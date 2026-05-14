@@ -15,69 +15,72 @@ export type Student = {
   notes: string;
   lastContact?: string;
   avatar: string;
+  gender?: string;
+  dob?: string;
+  guardianPhone?: string;
 };
 
 export const studentsData: Student[] = [
   {
     id: 's1',
-    name: 'Rahul Sharma',
+    name: 'Santhosh Kumar',
     course: 'B.Tech Computer Science',
     year: 'First Year',
     phoneNumbers: [{ id: 'p1', type: 'Mobile', number: '+91 98765 43210' }],
-    email: 'rahul.s@example.in',
+    email: 'santhosh.k@example.in',
     status: 'new',
     notes: 'Interested in AI specialisation and hostel accommodation.',
-    avatar: 'https://ui-avatars.com/api/?name=Rahul+Sharma&background=random',
+    avatar: 'https://ui-avatars.com/api/?name=Santhosh+Kumar&background=random',
   },
   {
     id: 's2',
-    name: 'Priya Patel',
+    name: 'Mrs.Hamavathi',
     course: 'MBA Marketing',
     year: 'Post Graduate',
     phoneNumbers: [
       { id: 'p1', type: 'Mobile', number: '+91 91234 56789' },
       { id: 'p2', type: 'Home', number: '+91 11 2345 6789' }
     ],
-    email: 'priya.patel@example.in',
+    email: 'mrs.hamavathi@example.in',
     status: 'contacted',
     lastContact: '2 days ago',
     notes: 'Asked about scholarships and placement records.',
-    avatar: 'https://ui-avatars.com/api/?name=Priya+Patel&background=random',
+    avatar: 'https://ui-avatars.com/api/?name=mrs.hamavathi&background=random',
   },
   {
     id: 's3',
-    name: 'Amit Kumar',
+    name: 'Ranganadhan',
     course: 'B.Sc Mathematics',
     year: 'First Year',
     phoneNumbers: [{ id: 'p1', type: 'Mobile', number: '+91 99887 76655' }],
-    email: 'amit.k99@example.in',
+    email: 'ranganadhan.k99@example.in',
     status: 'enrolled',
     lastContact: '1 week ago',
     notes: 'Completed admission fee payment. Needs timetable.',
-    avatar: 'https://ui-avatars.com/api/?name=Amit+Kumar&background=random',
+    avatar: 'https://ui-avatars.com/api/?name=Ranganadhan&background=random',
   },
   {
     id: 's4',
-    name: 'Neha Gupta',
+    name: 'Jeelan',
     course: 'B.Tech Mechanical',
     year: 'Lateral Entry',
     phoneNumbers: [{ id: 'p1', type: 'Mobile', number: '+91 98989 89898' }],
-    email: 'neha.g@example.in',
+    email: 'jeelan.k@example.in',
     status: 'new',
     notes: 'Transferring from polytechnic. Wants to join robotics club.',
-    avatar: 'https://ui-avatars.com/api/?name=Neha+Gupta&background=random',
+    avatar: 'https://ui-avatars.com/api/?name=Jeelan&background=random',
   },
   {
     id: 's5',
-    name: 'Vikram Singh',
+    name: 'Sriram',
     course: 'BA Economics',
     year: 'First Year',
     phoneNumbers: [{ id: 'p1', type: 'Mobile', number: '+91 97777 66666' }],
-    email: 'vsingh@example.in',
+    email: 'sriram.k1@example.in',
     status: 'not_interested',
     lastContact: '3 weeks ago',
     notes: 'Decided to prepare for UPSC instead of joining college right now.',
-    avatar: 'https://ui-avatars.com/api/?name=Vikram+Singh&background=random',
+    avatar: 'https://ui-avatars.com/api/?name=sriram&background=random',
   },
 ];
 
