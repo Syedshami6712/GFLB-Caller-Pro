@@ -926,18 +926,29 @@ function App() {
     showToast('Contact deleted successfully.', 'success');
   };
 
-  const deleteDrive = async (id: string) => {
-    if (!window.confirm('Delete this campaign permanently?')) return;
+  const [driveToDelete, setDriveToDelete] = useState<string | null>(null);
+
+  const deleteDrive = (id: string) => {
+    setDriveToDelete(id);
+  };
+
+  const executeDeleteDrive = async (id: string) => {
+    // 1. Optimistic UI Updates
+    setDrives(prev => prev.filter(d => d.id !== id));
+    if (viewingDrive?.id === id) setViewingDrive(null);
+    setIsDriveModalOpen(false);
+    setDriveToDelete(null);
+    showToast('Drive deleted successfully.', 'success');
+
+    // 2. Background cloud deletion
     if (isCloudEnabled) {
       try {
         await deleteDoc(doc(db, "drives", id));
-      } catch {
+      } catch (err) {
+        console.error('Firestore delete campaign error:', err);
         showToast('Failed to delete campaign from cloud', 'error');
       }
     }
-    setDrives(drives.filter(d => d.id !== id));
-    if (viewingDrive?.id === id) setViewingDrive(null);
-    showToast('Drive deleted successfully.', 'success');
   };
 
   const handleLogin = (e: React.FormEvent) => {
@@ -3343,6 +3354,52 @@ function App() {
               </div>
             </motion.div>
           </motion.div>)}
+      </AnimatePresence>
+
+      {/* Campaign Purge Confirmation Modal */}
+      <AnimatePresence>
+        {driveToDelete && (
+          <motion.div
+            className="modal-overlay"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+          >
+            <motion.div
+              className="modal-content"
+              initial={{ y: 50, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: 50, opacity: 0 }}
+              {...{ style: Object.assign({}, { maxWidth: '420px' }) as any }}
+            >
+              <div className="modal-header">
+                <h2>Purge Campaign</h2>
+                <button className="btn-icon" title="Close" onClick={() => setDriveToDelete(null)}>
+                  <X size={20} />
+                </button>
+              </div>
+              <div className="modal-body py-6">
+                <p className="text-secondary m-0 text-lg leading-relaxed">
+                  Are you absolutely sure you want to permanently delete this campaign? This will remove the campaign folder and all associated indices. This action cannot be undone.
+                </p>
+              </div>
+              <div className="modal-footer flex gap-2 w-full">
+                <button className="btn btn-secondary flex-1" onClick={() => setDriveToDelete(null)}>
+                  ABORT
+                </button>
+                <button
+                  className="btn btn-primary flex-1 btn-glow"
+                  {...{ style: Object.assign({}, { backgroundColor: 'var(--danger)', borderColor: 'var(--danger)', boxShadow: '0 0 15px rgba(255, 77, 94, 0.4)' }) as any }}
+                  onClick={() => {
+                    executeDeleteDrive(driveToDelete);
+                  }}
+                >
+                  CONFIRM_PURGE
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
       </AnimatePresence>
 
       {/* ── HI-TECH Notification System (Main App) ── */}
