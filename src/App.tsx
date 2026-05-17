@@ -1,17 +1,16 @@
-/* eslint-disable react-hooks/set-state-in-effect, react-hooks/purity, @typescript-eslint/no-explicit-any */
-import { useState, useEffect } from 'react';
+/* noinspection CssInlineStyles */
+/* noinspection CssInlineStyles, JSUnusedGlobalSymbols */
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Phone, Users, LayoutDashboard, Settings, Search,
   PhoneCall, PhoneOff, MessageSquare, Mail,
   FileText, Copy, CheckCircle2,
-  ChevronLeft, ChevronRight, ChevronDown, X, Plus, Trash, Trash2, Edit, Edit3, SkipForward, Power, Download, FolderPlus, Cloud, LogOut, Bell, Save,
+  ChevronLeft, ChevronRight, ChevronDown, X, Plus, Trash, Trash2, Edit, Edit3, SkipForward, Power, Download, FolderPlus, Cloud, LogOut, Bell,
   Grid3x3, Delete, Database, Upload, BarChart3, Check, UserPlus,
   LayoutGrid, Layers, Activity, Zap, MoreHorizontal, PhoneIncoming, Clock,
 } from 'lucide-react';
-// import './Landing.css';
-
 import { motion, AnimatePresence } from 'framer-motion';
-import { GoogleLogin } from '@react-oauth/google';
+import { GoogleLogin, type CredentialResponse } from '@react-oauth/google';
 import { jwtDecode } from 'jwt-decode';
 import * as XLSX from 'xlsx';
 import { db } from './firebase';
@@ -19,9 +18,10 @@ import {
   collection, doc, setDoc, onSnapshot, query,
   orderBy, deleteDoc
 } from 'firebase/firestore';
-import { studentsData, type Student, type PhoneNumber } from './data';
+import { studentsData, scripts, type Student } from './data';
 import gflbLogo from './assets/GFLB LOGO.png';
-// Dynamic default avatar generator
+import './App.css';
+
 const getAvatar = (name: string, existingAvatar?: string) => {
   if (existingAvatar && !existingAvatar.includes('default_avatar.png') && existingAvatar.startsWith('http')) {
     return existingAvatar;
@@ -29,12 +29,27 @@ const getAvatar = (name: string, existingAvatar?: string) => {
   return `https://ui-avatars.com/api/?name=${encodeURIComponent(name || 'User')}&background=random&color=fff`;
 };
 
-// Clean phone number for comparison
 const cleanPhone = (num: string) => (num || '').replace(/[^\d+]/g, '');
-import './App.css';
 
+const csvCell = (row: unknown[], index: number) =>
+  index !== -1 ? String(row[index] ?? '') : '';
 
+const createCallLogId = () => `log_${Date.now()}`;
 
+const ENGAGEMENT_BAR_HEIGHTS = Array.from({ length: 24 }, (_, i) => 15 + ((i * 37 + 13) % 86));
+
+const applyAutoSyncTime = () => {
+  const h = new Date().getHours();
+  const isDay = h >= 6 && h < 18;
+  document.body.setAttribute('data-auto-time', isDay ? 'day' : 'night');
+  if (document.body.classList.contains('theme-auto-sync')) {
+    document.body.classList.toggle('theme-lunar-silv', isDay);
+  }
+};
+
+type GoogleJwtPayload = { name?: string; email?: string; picture?: string };
+
+type CsvSheetPreview = { name: string; headers: string[]; rows: unknown[][] };
 
 type CallLog = {
   id: string;
@@ -56,7 +71,7 @@ type Drive = {
 type AppSettings = {
   autoDialDelay: number;
   callerId: string;
-  theme: 'light' | 'dark' | 'system' | 'gold' | 'silver';
+  theme: 'dark' | 'emerald' | 'gold' | 'silver' | 'system';
   smsTemplate: string;
 };
 
@@ -82,14 +97,14 @@ function App() {
     }));
     return parsed;
   });
-  const [activeStudent, setActiveStudent] = useState<Student>(() => {
+  const [activeStudent, setActiveStudent] = useState<Student | null>(() => {
     const saved = localStorage.getItem('ksk_students');
     let parsed = saved ? JSON.parse(saved) : studentsData;
     parsed = parsed.map((s: Student) => ({
       ...s,
       avatar: getAvatar(s.name, s.avatar)
     }));
-    return parsed.length > 0 ? parsed[0] : studentsData[0];
+    return parsed.length > 0 ? parsed[0] : null;
   });
   const [searchTerm, setSearchTerm] = useState('');
   const [driveSearchTerm, setDriveSearchTerm] = useState('');
@@ -102,7 +117,6 @@ function App() {
   // Call State
   const [isCalling, setIsCalling] = useState(false);
   const [callDuration, setCallDuration] = useState(0);
-  const [selectedPhone, setSelectedPhone] = useState<PhoneNumber | null>(null);
   const [callLogs, setCallLogs] = useState<CallLog[]>(() => {
     const saved = localStorage.getItem('ksk_callLogs');
     return saved ? JSON.parse(saved, (key, value) => key === 'timestamp' ? new Date(value) : value) : [];
@@ -125,7 +139,7 @@ function App() {
     return saved ? JSON.parse(saved) : {
       autoDialDelay: 3,
       callerId: 'University Admissions',
-      theme: 'system',
+      theme: 'dark',
       smsTemplate: 'Hi [Name], this is from [CallerId].'
     };
   });
@@ -142,6 +156,43 @@ function App() {
 
   // Context Menu State
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number, student: Student, driveId: string } | null>(null);
+
+  const [autoDialEnabled, setAutoDialEnabled] = useState(false);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth <= 768);
+  const [mobileViewMode, setMobileViewMode] = useState<'list' | 'detail'>('list');
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [editingStudent, setEditingStudent] = useState<Student | null>(null);
+  const [isNewContact, setIsNewContact] = useState(false);
+  const [csvPreview, setCsvPreview] = useState<{
+    sheets: CsvSheetPreview[];
+    fileName: string;
+  } | null>(null);
+  const [csvMapping, setCsvMapping] = useState({
+    name: 0,
+    phone: 1,
+    course: 2,
+    gender: 3,
+    dob: 4,
+    guardianPhone: 5
+  });
+  const [isCsvModalOpen, setIsCsvModalOpen] = useState(false);
+  const [selectedDriveForImport, setSelectedDriveForImport] = useState<string>('');
+  const [overrideCourseWithDrive, setOverrideCourseWithDrive] = useState<boolean>(true);
+  const [isDriveFilterOpen, setIsDriveFilterOpen] = useState(false);
+  const [driveFilterGender, setDriveFilterGender] = useState('');
+  const [driveFilterCourse, setDriveFilterCourse] = useState('');
+  const [driveFilterBatch, setDriveFilterBatch] = useState('');
+  const [isAddContactModalOpen, setIsAddContactModalOpen] = useState(false);
+  const [selectedContactsForDrive, setSelectedContactsForDrive] = useState<string[]>([]);
+  const [addContactSearchTerm, setAddContactSearchTerm] = useState('');
+  const [analyticsNodeId] = useState(() =>
+    Math.random().toString(36).substring(7).toUpperCase()
+  );
+  const [isCopilotOpen, setIsCopilotOpen] = useState(false);
+  const notesRef = useRef<HTMLTextAreaElement>(null);
+
+  const selectedPhone = activeStudent ? (activeStudent.phoneNumbers[0] ?? null) : null;
 
   useEffect(() => {
     if (!isCloudEnabled) {
@@ -193,52 +244,31 @@ function App() {
   }, [isCloudEnabled]);
 
   useEffect(() => {
-    document.body.classList.remove('theme-neon-dark', 'theme-solar-gold', 'theme-lunar-silv', 'theme-auto-sync');
-    if (appSettings.theme === 'dark') document.body.classList.add('theme-neon-dark');
-    else if (appSettings.theme === 'gold') document.body.classList.add('theme-solar-gold');
-    else if (appSettings.theme === 'silver') document.body.classList.add('theme-lunar-silv');
-    else document.body.classList.add('theme-auto-sync');
+    document.body.classList.remove(
+      'theme-neon-dark', 'theme-neon-emerald',
+      'theme-solar-gold', 'theme-lunar-silv', 'theme-auto-sync'
+    );
+    document.body.removeAttribute('data-auto-time');
+
+    if (appSettings.theme === 'dark' || appSettings.theme === 'emerald') {
+      document.body.classList.add('theme-neon-emerald');
+    } else if (appSettings.theme === 'gold') {
+      document.body.classList.add('theme-solar-gold');
+    } else if (appSettings.theme === 'silver') {
+      document.body.classList.add('theme-lunar-silv');
+    } else {
+      // AUTO_SYNC
+      document.body.classList.add('theme-auto-sync');
+      applyAutoSyncTime();
+    }
   }, [appSettings.theme]);
 
-
-  // Auto Dialer / Multi Call
-  const [autoDialEnabled, setAutoDialEnabled] = useState(false);
-
-  const [toast, setToast] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
-
-  // Mobile View State
-  const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
-  const [mobileViewMode, setMobileViewMode] = useState<'list' | 'detail'>('list');
-
-  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
-  const [editingStudent, setEditingStudent] = useState<Student | null>(null);
-  const [isNewContact, setIsNewContact] = useState(false);
-
-  // CSV Import Preview State
-  const [csvPreview, setCsvPreview] = useState<{
-    sheets: { name: string, headers: string[], rows: any[][] }[],
-    fileName: string
-  } | null>(null);
-  const [csvMapping, setCsvMapping] = useState({
-    name: 0,
-    phone: 1,
-    course: 2,
-    gender: 3,
-    dob: 4,
-    guardianPhone: 5
-  });
-  const [isCsvModalOpen, setIsCsvModalOpen] = useState(false);
-  const [selectedDriveForImport, setSelectedDriveForImport] = useState<string>('');
-  const [overrideCourseWithDrive, setOverrideCourseWithDrive] = useState<boolean>(true);
-
-  // Campaign Filters
-  const [isDriveFilterOpen, setIsDriveFilterOpen] = useState(false);
-  const [driveFilterGender, setDriveFilterGender] = useState('');
-  const [driveFilterCourse, setDriveFilterCourse] = useState('');
-  const [driveFilterBatch, setDriveFilterBatch] = useState('');
-  const [isAddContactModalOpen, setIsAddContactModalOpen] = useState(false);
-  const [selectedContactsForDrive, setSelectedContactsForDrive] = useState<string[]>([]);
-  const [addContactSearchTerm, setAddContactSearchTerm] = useState('');
+  // Keep AUTO_SYNC refreshed every 60 seconds
+  useEffect(() => {
+    if (appSettings.theme !== 'system') return;
+    const id = setInterval(applyAutoSyncTime, 60_000);
+    return () => clearInterval(id);
+  }, [appSettings.theme]);
 
   const showToast = (message: string, type: 'success' | 'info' | 'error' = 'success') => {
     setToast({ message, type });
@@ -270,14 +300,6 @@ function App() {
   }, [isMobile, currentTab, mobileViewMode, activeStudent?.id]);
 
   useEffect(() => {
-    if (activeStudent && activeStudent.phoneNumbers.length > 0) {
-      setSelectedPhone(activeStudent.phoneNumbers[0]);
-    } else {
-      setSelectedPhone(null);
-    }
-  }, [activeStudent]);
-
-  useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!isDialPadOpen) return;
 
@@ -303,16 +325,11 @@ function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isDialPadOpen, dialNumber]);
 
-  // Timer logic for active call
   useEffect(() => {
-    let interval: number;
-    if (isCalling) {
-      interval = window.setInterval(() => {
-        setCallDuration((prev) => prev + 1);
-      }, 1000);
-    } else {
-      setCallDuration(0);
-    }
+    if (!isCalling) return;
+    const interval = window.setInterval(() => {
+      setCallDuration((prev) => prev + 1);
+    }, 1000);
     return () => clearInterval(interval);
   }, [isCalling]);
 
@@ -330,6 +347,177 @@ function App() {
     return encodeURIComponent(msg);
   };
 
+  const resolveScript = (content: string, student: Student) =>
+    content
+      .replace(/\[Name\]/g, student.name.split(' ')[0])
+      .replace(/\[Course\]/g, student.course)
+      .replace(/\[Your Name\]/g, appSettings.callerId);
+
+  const getFilteredStudentList = () => {
+    const q = searchTerm.toLowerCase();
+    const digits = searchTerm.replace(/[^\d+]/g, '');
+    return students
+      .filter(s =>
+        s.name.toLowerCase().includes(q) ||
+        s.course.toLowerCase().includes(q) ||
+        (digits.length > 0 && s.phoneNumbers.some(p => p.number.replace(/[^\d+]/g, '').includes(digits)))
+      )
+      .sort((a, b) => a.name.localeCompare(b.name));
+  };
+
+  const openWhatsApp = (student: Student) => {
+    const num = student.phoneNumbers[0]?.number;
+    if (!num) {
+      showToast('No phone number on file', 'error');
+      return;
+    }
+    window.open(`https://wa.me/${cleanPhone(num)}?text=${getFormattedMessage(student)}`, '_blank');
+  };
+
+  const openEmail = (student: Student) => {
+    const subject = encodeURIComponent(`Admission inquiry — ${student.course}`);
+    const body = getFormattedMessage(student);
+    if (student.email) {
+      window.open(`mailto:${student.email}?subject=${subject}&body=${body}`, '_self');
+    } else {
+      window.open(`mailto:?subject=${subject}&body=${body}`, '_self');
+      showToast('No email on file — opened mail composer', 'info');
+    }
+  };
+
+  const downloadBrochure = (student: Student) => {
+    const text = [
+      'GFLB University — Admissions Brochure',
+      '',
+      `Prepared for: ${student.name}`,
+      `Program: ${student.course}`,
+      `Academic year: ${student.year}`,
+      '',
+      'For full brochure and fee structure, contact admissions@university.edu',
+    ].join('\n');
+    const blob = new Blob([text], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `Brochure_${student.name.replace(/\s+/g, '_')}.txt`;
+    link.click();
+    URL.revokeObjectURL(url);
+    showToast('Brochure downloaded', 'success');
+  };
+
+  const focusSessionNotes = () => {
+    document.getElementById('session-notes-textarea')?.focus();
+    showToast('Session notes ready', 'info');
+  };
+
+  const copyToClipboard = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast('Copied to clipboard', 'success');
+    } catch {
+      showToast('Copy failed', 'error');
+    }
+  };
+
+  const exportIntel = () => {
+    const data = { students, drives, callLogs, settings: appSettings, exportDate: new Date().toISOString() };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `GFLB_INTEL_${new Date().toISOString().split('T')[0]}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    showToast('Intel exported', 'success');
+  };
+
+  const exportCallLogsIntel = () => {
+    const blob = new Blob([JSON.stringify(callLogs, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `GFLB_CALL_LOGS_${new Date().toISOString().split('T')[0]}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    showToast('Call logs exported', 'success');
+  };
+
+  const deleteCallLogById = async (id: string) => {
+    if (isCloudEnabled) {
+      try {
+        await deleteDoc(doc(db, 'callLogs', id));
+      } catch {
+        showToast('Failed to delete log from cloud', 'error');
+        return;
+      }
+    }
+    setCallLogs(prev => prev.filter(l => l.id !== id));
+    showToast('Log entry removed', 'success');
+  };
+
+  const wipeAllCallLogs = async () => {
+    if (!window.confirm('Wipe all session telemetry?')) return;
+    if (isCloudEnabled) {
+      await Promise.all(
+        callLogs.map(log =>
+          deleteDoc(doc(db, 'callLogs', log.id)).catch(() => undefined)
+        )
+      );
+    }
+    setCallLogs([]);
+    showToast('All logs wiped', 'success');
+  };
+
+
+  const importIntelBackup = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const data = JSON.parse(String(event.target?.result)) as {
+          students?: Student[];
+          drives?: Drive[];
+          callLogs?: CallLog[];
+          settings?: AppSettings;
+        };
+        if (data.students?.length) {
+          setStudents(data.students.map(s => ({ ...s, avatar: getAvatar(s.name, s.avatar) })));
+          setActiveStudent(data.students[0]);
+        }
+        if (data.drives) setDrives(data.drives);
+        if (data.callLogs) {
+          setCallLogs(
+            data.callLogs.map(log => ({
+              ...log,
+              timestamp: new Date(log.timestamp),
+            }))
+          );
+        }
+        if (data.settings) setAppSettings(data.settings);
+        showToast('Backup restored successfully', 'success');
+      } catch {
+        showToast('Invalid backup file', 'error');
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const removeContactFromDrive = async (driveId: string, studentId: string) => {
+    const drive = drives.find(d => d.id === driveId);
+    if (!drive) return;
+    const updatedDrive = { ...drive, contactIds: drive.contactIds.filter(id => id !== studentId) };
+    if (isCloudEnabled) {
+      try {
+        await setDoc(doc(db, 'drives', updatedDrive.id), updatedDrive);
+      } catch {
+        showToast('Failed to update campaign in cloud', 'error');
+        return;
+      }
+    }
+    setDrives(drives.map(d => (d.id === updatedDrive.id ? updatedDrive : d)));
+    if (viewingDrive?.id === updatedDrive.id) setViewingDrive(updatedDrive);
+    showToast('Contact removed from campaign', 'info');
+  };
+
   const handleCallToggle = async () => {
     if (!activeStudent || activeStudent.phoneNumbers.length === 0 || !selectedPhone) {
       showToast('No phone number available to call', 'error');
@@ -337,6 +525,7 @@ function App() {
     }
 
     if (!isCalling) {
+      setCallDuration(0);
       setIsCalling(true);
       showToast(`Dialing ${selectedPhone.number}...`, 'info');
       const dialNumber = selectedPhone.number.replace(/[^\d+]/g, '');
@@ -346,7 +535,7 @@ function App() {
       showToast(`Call ended. Duration: ${formatTime(callDuration)}`, 'success');
 
       const newLog: CallLog = {
-        id: `log_${Date.now()}`,
+        id: createCallLogId(),
         studentName: activeStudent.name,
         phoneNumber: selectedPhone.number,
         duration: callDuration,
@@ -357,8 +546,8 @@ function App() {
       if (isCloudEnabled) {
         try {
           await setDoc(doc(db, "callLogs", newLog.id), newLog);
-        } catch (err) {
-          console.error('Cloud log error:', err);
+        } catch {
+          showToast('Failed to save call log to cloud', 'error');
         }
       }
 
@@ -411,8 +600,8 @@ function App() {
     if (isCloudEnabled) {
       try {
         await setDoc(doc(db, "students", updatedStudent.id), updatedStudent);
-      } catch (err) {
-        console.error('Cloud update error:', err);
+      } catch {
+        showToast('Failed to update cloud contact', 'error');
       }
     }
     const updatedStudents = students.map(s =>
@@ -434,14 +623,33 @@ function App() {
   };
 
   const skipToNext = () => {
-    if (isCalling) return;
-    const currentIndex = students.findIndex(s => s.id === activeStudent.id);
-    if (currentIndex < students.length - 1) {
-      setActiveStudent(students[currentIndex + 1]);
+    if (isCalling || !activeStudent) return;
+
+    let list: Student[] = [];
+    if (currentTab === 'contacts') {
+      list = getFilteredStudentList();
+    } else if (currentTab === 'drives' && viewingDrive) {
+      list = students
+        .filter(s => viewingDrive.contactIds.includes(s.id))
+        .filter(s => {
+          const matchesSearch = s.name.toLowerCase().includes(driveContactSearchTerm.toLowerCase()) ||
+            s.course.toLowerCase().includes(driveContactSearchTerm.toLowerCase());
+          const matchesGender = !driveFilterGender || s.gender === driveFilterGender;
+          const matchesCourse = !driveFilterCourse || s.course === driveFilterCourse;
+          const matchesBatch = !driveFilterBatch || s.year === driveFilterBatch;
+          return matchesSearch && matchesGender && matchesCourse && matchesBatch;
+        });
     } else {
-      showToast('You are at the end of the list.', 'info');
+      list = getFilteredStudentList();
     }
-  }
+
+    if (list.length <= 1) return;
+
+    const currentIndex = list.findIndex(s => s.id === activeStudent.id);
+    const nextIndex = (currentIndex + 1) % list.length;
+    setActiveStudent(list[nextIndex]);
+    showToast(`Skipped to ${list[nextIndex].name}`, 'info');
+  };
 
   const navigateTo = (tab: 'contacts' | 'drives' | 'logs' | 'analytics' | 'settings') => {
     setCurrentTab(tab);
@@ -459,13 +667,13 @@ function App() {
     reader.onload = (event) => {
       const data = event.target?.result;
       const workbook = XLSX.read(data, { type: 'binary' });
-      const sheetsData: any[] = [];
+      const sheetsData: CsvSheetPreview[] = [];
 
       workbook.SheetNames.forEach(sheetName => {
         const worksheet = workbook.Sheets[sheetName];
-        const json: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+        const json = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as unknown[][];
         if (json.length > 0) {
-          const headers = json[0].map((h: any) => String(h || '').trim());
+          const headers = json[0].map((h) => String(h ?? '').trim());
           const rows = json.slice(1).filter(r => r.length > 0);
           sheetsData.push({ name: sheetName, headers, rows });
         }
@@ -534,8 +742,7 @@ function App() {
         try {
           await setDoc(doc(db, "students", editingStudent.id), editingStudent);
           showToast(isNewContact ? 'Contact added to cloud!' : 'Cloud updated!');
-        } catch (err) {
-          console.error('Cloud save error:', err);
+        } catch {
           showToast('Failed to save to cloud', 'error');
         }
       }
@@ -650,8 +857,8 @@ function App() {
             await setDoc(doc(db, "students", s.id), s);
           }
           showToast('Cloud campaign updated!');
-        } catch (err) {
-          console.error('Cloud drive save error:', err);
+        } catch {
+          showToast('Failed to save campaign to cloud', 'error');
         }
       }
 
@@ -678,15 +885,40 @@ function App() {
     if (isCloudEnabled) {
       try {
         await deleteDoc(doc(db, "students", id));
-      } catch (err) {
-        console.error('Cloud delete error:', err);
+      } catch {
+        showToast('Failed to delete contact from cloud', 'error');
       }
     }
     const updatedStudents = students.filter(s => s.id !== id);
-    setStudents(updatedStudents);
+
     if (activeStudent?.id === id) {
-      setActiveStudent(updatedStudents[0] || null);
+      // Find the next student in the current list context before updating students state
+      let list: Student[] = [];
+      if (currentTab === 'contacts') {
+        list = getFilteredStudentList();
+      } else if (currentTab === 'drives' && viewingDrive) {
+        list = students
+          .filter(s => viewingDrive.contactIds.includes(s.id))
+          .filter(s => {
+            const matchesSearch = s.name.toLowerCase().includes(driveContactSearchTerm.toLowerCase()) ||
+              s.course.toLowerCase().includes(driveContactSearchTerm.toLowerCase());
+            const matchesGender = !driveFilterGender || s.gender === driveFilterGender;
+            const matchesCourse = !driveFilterCourse || s.course === driveFilterCourse;
+            const matchesBatch = !driveFilterBatch || s.year === driveFilterBatch;
+            return matchesSearch && matchesGender && matchesCourse && matchesBatch;
+          });
+      } else {
+        list = getFilteredStudentList();
+      }
+
+      const currentIndex = list.findIndex(s => s.id === id);
+      const nextStudent = list[currentIndex + 1] || list[currentIndex - 1] || updatedStudents[0] || null;
+      setActiveStudent(nextStudent);
+
+      if (isMobile && updatedStudents.length === 0) setMobileViewMode('list');
     }
+
+    setStudents(updatedStudents);
     setDrives(drives.map(d => ({
       ...d,
       contactIds: d.contactIds.filter(cId => cId !== id)
@@ -695,11 +927,12 @@ function App() {
   };
 
   const deleteDrive = async (id: string) => {
+    if (!window.confirm('Delete this campaign permanently?')) return;
     if (isCloudEnabled) {
       try {
         await deleteDoc(doc(db, "drives", id));
-      } catch (err) {
-        console.error('Cloud delete error:', err);
+      } catch {
+        showToast('Failed to delete campaign from cloud', 'error');
       }
     }
     setDrives(drives.filter(d => d.id !== id));
@@ -718,9 +951,13 @@ function App() {
     }
   };
 
-  const handleGoogleSuccess = (credentialResponse: any) => {
+  const handleGoogleSuccess = (credentialResponse: CredentialResponse) => {
     try {
-      const decoded: any = jwtDecode(credentialResponse.credential);
+      if (!credentialResponse.credential) {
+        showToast('Authentication failed', 'error');
+        return;
+      }
+      const decoded = jwtDecode<GoogleJwtPayload>(credentialResponse.credential);
       setIsAuthenticated(true);
       localStorage.setItem('ksk_auth', 'true');
       localStorage.setItem('ksk_user', JSON.stringify({
@@ -728,10 +965,9 @@ function App() {
         email: decoded.email,
         picture: decoded.picture
       }));
-      setLoginEmail(decoded.email);
-      showToast(`Welcome, ${decoded.name}!`, 'success');
-    } catch (err) {
-      console.error('Google decode error:', err);
+      setLoginEmail(decoded.email ?? '');
+      showToast(`Welcome, ${decoded.name ?? 'User'}!`, 'success');
+    } catch {
       showToast('Authentication failed', 'error');
     }
   };
@@ -745,7 +981,10 @@ function App() {
     interested: students.filter(s => s.status !== 'not_interested' && s.status !== 'new').length,
     conversionRate: students.length > 0 ? Math.round((students.filter(s => s.status === 'enrolled').length / students.length) * 100) : 0,
     totalCallTime: callLogs.reduce((acc, log) => acc + log.duration, 0),
-    avgCallTime: callLogs.length > 0 ? Math.round(callLogs.reduce((acc, log) => acc + log.duration, 0) / callLogs.length) : 0
+    avgCallTime: callLogs.length > 0 ? Math.round(callLogs.reduce((acc, log) => acc + log.duration, 0) / callLogs.length) : 0,
+    callSuccessRate: callLogs.length > 0
+      ? Math.round((callLogs.filter(l => l.status === 'completed').length / callLogs.length) * 100)
+      : 0,
   };
 
 
@@ -761,17 +1000,17 @@ function App() {
         >
           <div className="login-header">
             {isMobile ? (
-              <div className="mobile-logo-box" style={{ width: '120px', height: '120px', margin: '0 auto 1.5rem auto' }}>
+              <div className="mobile-logo-box mobile-logo-box-login">
                 <div className="logo-glow-sweep" />
-                <img src={gflbLogo} alt="GFLB Studio" style={{ width: '80px', height: 'auto' }} />
+                <img src={gflbLogo} alt="GFLB Studio" className="animated-logo" />
               </div>
             ) : (
-              <img src={gflbLogo} alt="GFLB Studio" className="animated-logo" style={{ height: '80px', objectFit: 'contain', margin: '0 auto 1.5rem auto', display: 'block' }} />
+              <img src={gflbLogo} alt="GFLB Studio" className="animated-logo login-logo-img" />
             )}
             <p>Sign in to your agent dashboard</p>
           </div>
 
-          <div className="google-login-wrap" style={{ display: 'flex', justifyContent: 'center', marginBottom: '1rem' }}>
+          <div className="google-login-wrap">
             <GoogleLogin
               onSuccess={handleGoogleSuccess}
               onError={() => showToast('Login Failed', 'error')}
@@ -786,7 +1025,7 @@ function App() {
           <div className="divider">or</div>
 
           <form onSubmit={handleLogin} className="flex flex-col gap-4">
-            <div className="input-group" style={{ marginBottom: 0 }}>
+            <div className="input-group input-group-no-mb">
               <label className="input-label">Email Address</label>
               <input
                 type="email"
@@ -796,7 +1035,7 @@ function App() {
                 onChange={(e) => setLoginEmail(e.target.value)}
               />
             </div>
-            <div className="input-group" style={{ marginBottom: 0 }}>
+            <div className="input-group input-group-no-mb">
               <label className="input-label">Password</label>
               <input
                 type="password"
@@ -879,7 +1118,7 @@ function App() {
               <BarChart3 size={24} strokeWidth={1.5} />
               <span>ANALYTICS</span>
             </button>
-            <div style={{ flexGrow: 1 }}></div>
+            <div className="nav-spacer"></div>
             <button className={`nav-item ${currentTab === 'settings' ? 'active' : ''}`} onClick={() => navigateTo('settings')}>
               <Settings size={24} strokeWidth={1.5} />
               <span>Settings</span>
@@ -901,7 +1140,7 @@ function App() {
             <div className="mobile-nav-icon-wrap">
               <LayoutDashboard size={24} strokeWidth={currentTab === 'drives' ? 2.5 : 1.5} />
             </div>
-            <span>Campaigns</span>
+            <span>Drive</span>
           </button>
           <button className={`mobile-nav-item ${currentTab === 'logs' ? 'active' : ''}`} onClick={() => navigateTo('logs')}>
             <div className="mobile-nav-icon-wrap">
@@ -934,7 +1173,7 @@ function App() {
                 <img src={gflbLogo} alt="GFLB" />
               </div>
             )}
-            <h1 style={{ fontFamily: 'var(--font-heading)' }}>GFLB CALLER PRO</h1>
+            <h1 className="h1-heading-font">GFLB CALLER PRO</h1>
           </div>
           <div className="header-actions">
             {!isMobile && (
@@ -942,7 +1181,6 @@ function App() {
                 type="button"
                 className={`auto-dialer-toggle ${autoDialEnabled ? 'active' : ''}`}
                 onClick={() => setAutoDialEnabled(!autoDialEnabled)}
-                aria-pressed={autoDialEnabled}
               >
                 <span className="auto-dialer-dot" />
                 <span className="auto-dialer-copy">
@@ -953,6 +1191,20 @@ function App() {
               </button>
             )}
             <div className="header-icon-cluster">
+              <label className="hud-icon-btn hud-label-import" title="Import contacts">
+                <Upload size={20} />
+                <input
+                  type="file"
+                  title="Import contacts"
+                  accept=".csv,.xlsx,.xls"
+                  className="file-input-hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) processFile(file);
+                    e.target.value = '';
+                  }}
+                />
+              </label>
               <button className="hud-icon-btn" aria-label="Open dial pad" onClick={() => setIsDialPadOpen(true)}><Grid3x3 size={20} /></button>
               {!isMobile && (
                 <button className="hud-icon-btn danger" aria-label="Sign out" onClick={() => { setIsAuthenticated(false); localStorage.removeItem('ksk_auth'); }}><Power size={20} /></button>
@@ -974,50 +1226,38 @@ function App() {
                 </div>
                 <div className="search-box mb-6">
                   <input type="text" className="search-input" placeholder="Search name, course, number..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
-                  <button className="search-btn"><Search size={18} /></button>
+                  <button className="search-btn" title="Search contacts"><Search size={18} /></button>
                 </div>
                 <div className="student-list flex-1 overflow-y-auto pr-1">
                   {filteredStudents.map(student => (
                     <div
                       key={student.id}
-                      className={`student-card-hud ${activeStudent?.id === student.id ? 'active' : ''}`}
+                      className={`student-card-hud student-card-inner ${activeStudent?.id === student.id ? 'active is-active' : 'is-inactive'}`}
                       onClick={() => handleStudentSelect(student)}
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '1rem',
-                        padding: '1rem',
-                        borderRadius: '12px',
-                        marginBottom: '0.5rem',
-                        cursor: 'pointer',
-                        transition: '0.3s',
-                        background: activeStudent?.id === student.id ? 'rgba(212,175,55,0.1)' : 'transparent',
-                        border: activeStudent?.id === student.id ? '1px solid rgba(212,175,55,0.3)' : '1px solid transparent'
-                      }}
                     >
-                      <div className="avatar-hud-wrap" style={{ width: '40px', height: '40px', borderRadius: '50%', border: '2px solid', borderColor: activeStudent?.id === student.id ? 'var(--neon-gold)' : 'rgba(255,255,255,0.1)', padding: '2px' }}>
-                        <div className="w-full h-full rounded-full flex items-center justify-center bg-zinc-900 font-bold text-xs" style={{ fontFamily: 'var(--font-heading)', color: 'var(--neon-gold)' }}>
+                      <div className={`avatar-hud-wrap avatar-hud-circle ${activeStudent?.id === student.id ? 'is-active' : 'is-inactive'}`}>
+                        <div className="w-full h-full rounded-full flex items-center justify-center bg-zinc-900 font-bold text-xs avatar-initials">
                           {student.name.split(' ').map(n => n[0]).join('').toUpperCase().substring(0, 2)}
                         </div>
                       </div>
                       <div className="flex-1 min-w-0">
-                        <h4 style={{ margin: 0, fontSize: '0.85rem', color: activeStudent?.id === student.id ? 'var(--neon-gold)' : '#fff' }}>{student.name}</h4>
-                        <p style={{ margin: 0, fontSize: '0.7rem', color: 'var(--text-muted)' }}>{student.course}</p>
+                        <h4 {...{ style: Object.assign({}, { margin: 0, fontSize: '0.85rem', color: activeStudent?.id === student.id ? 'var(--neon-gold)' : '#fff' }) as any }}>{student.name}</h4>
+                        <p {...{ style: Object.assign({}, { margin: 0, fontSize: '0.7rem', color: 'var(--text-muted)' }) as any }}>{student.course}</p>
                       </div>
-                      <span className={`badge-hud badge-${student.status}`} style={{ fontSize: '0.6rem', padding: '2px 6px' }}>{student.status.toUpperCase()}</span>
+                      <span className={`badge-hud badge-${student.status}`} {...{ style: Object.assign({}, { fontSize: '0.6rem', padding: '2px 6px' }) as any }}>{student.status.toUpperCase()}</span>
                     </div>
                   ))}
                 </div>
                 {!isMobile && (
-                  <button className="btn-neon-outline w-full mt-4" style={{ borderStyle: 'solid' }} onClick={openAddContactModal}>+ ADD NEW CONTACT</button>
+                  <button className="btn-neon-outline btn-solid-border w-full mt-4" onClick={openAddContactModal}>+ ADD NEW CONTACT</button>
                 )}
               </div>
             </section>
 
             {/* Middle Column: Profile & Dialer */}
             <section className={`profile-panel ${isMobile && mobileViewMode === 'list' ? 'mobile-hidden' : ''}`}>
-              <div className="flex-1 overflow-y-auto" style={{ scrollbarWidth: 'none' }}>
-                {activeStudent && (
+              <div className="flex-1 overflow-y-auto profile-scroll-no-bar">
+                {activeStudent ? (
                   <div className="p-8">
                     {isMobile && (
                       <button type="button" className="mobile-back-to-list" onClick={() => setMobileViewMode('list')}>
@@ -1027,38 +1267,38 @@ function App() {
                     )}
                     {/* Header Card */}
                     <div className="flex items-center gap-8 mb-12">
-                      <div className="hud-avatar-outer-glow" style={{ width: '120px', height: '120px', borderRadius: '50%', padding: '4px', background: 'radial-gradient(circle, var(--neon-gold), transparent)' }}>
-                        <div className="hud-avatar-inner-wrap" style={{ width: '100%', height: '100%', borderRadius: '50%', background: '#000', padding: '4px' }}>
-                          <div className="w-full h-full flex items-center justify-center bg-black text-3xl font-black" style={{ fontFamily: 'var(--font-heading)', color: 'var(--neon-gold)' }}>
+                      <div className="hud-avatar-outer-glow hud-avatar-outer">
+                        <div className="hud-avatar-inner-wrap hud-avatar-inner">
+                          <div className="w-full h-full flex items-center justify-center bg-black text-3xl font-black profile-initials">
                             {activeStudent.name.split(' ').map(n => n[0]).join('').toUpperCase().substring(0, 2)}
                           </div>
                         </div>
                       </div>
                       <div className="flex-1">
-                        <div className="hud-tag-label" style={{ fontSize: '0.6rem', color: 'var(--neon-gold)', fontWeight: 800 }}>CONTACT_PROFILE</div>
-                        <h2 className="hud-value-lg" style={{ margin: '0 0 0.5rem 0', fontSize: '2.5rem', fontWeight: 900, letterSpacing: '-0.02em' }}>{activeStudent.name}</h2>
+                        <div className="hud-tag-label profile-tag-label">LEAD_PROFILE</div>
+                        <h2 className="hud-value-lg profile-name">{activeStudent.name}</h2>
                         <div className="flex items-center gap-3">
-                          <span className="badge-hud badge-new">NEW</span>
-                          <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontFamily: 'var(--font-heading)' }}>{activeStudent.course}</span>
+                          <span className="badge-hud badge-new">{activeStudent.status.toUpperCase()}</span>
+                          <span className="profile-course-text">{activeStudent.course}</span>
                         </div>
                       </div>
                       <div className="flex gap-2">
-                        <button className="btn-neon-outline" onClick={skipToNext}><SkipForward size={14} /> SKIP</button>
-                        <button className="btn-neon-outline" onClick={() => openEditContactModal(activeStudent)}><Edit size={14} /> EDIT</button>
-                        <button className="btn-neon-outline" style={{ color: 'var(--danger)', borderColor: 'var(--danger)' }} onClick={() => deleteStudent(activeStudent.id)}><Trash size={14} /> DELETE</button>
+                        <button className="btn-neon-outline" onClick={skipToNext} title="Skip to next lead"><SkipForward size={14} /> SKIP</button>
+                        <button className="btn-neon-outline" onClick={() => openEditContactModal(activeStudent)} title="Modify current lead"><Edit size={14} /> EDIT</button>
+                        <button className="btn-neon-outline btn-neon-danger" onClick={() => { deleteStudent(activeStudent.id); setActiveStudent(null); }} title="Erase lead permanently"><Trash size={14} /> DELETE</button>
                       </div>
                     </div>
 
                     {/* Channels */}
                     <div className="hud-label mb-4">COMM_CHANNELS</div>
-                    <div className="hud-card mb-12" style={{ borderColor: 'var(--neon-gold)' }}>
+                    <div className="hud-card hud-card-gold-border mb-12">
                       <div className="flex items-center gap-6">
-                        <div className="w-10 h-10 rounded bg-gold-glow-soft flex items-center justify-center text-gold" style={{ color: 'var(--neon-gold)' }}><Phone size={20} /></div>
+                        <div className="w-10 h-10 rounded bg-gold-glow-soft flex items-center justify-center text-gold phone-icon-gold"><Phone size={20} /></div>
                         <div className="flex-1">
                           <div className="text-[0.6rem] text-muted font-bold">MOBILE</div>
                           <div className="text-xl font-mono tracking-widest text-white">{activeStudent.phoneNumbers[0]?.number}</div>
                         </div>
-                        <div className="flex gap-2"><MoreHorizontal size={20} className="text-muted" /></div>
+                        <div className="flex gap-2"><MoreHorizontal size={20} /></div>
                       </div>
                     </div>
 
@@ -1066,39 +1306,57 @@ function App() {
                     <div className="hud-dialer-container py-12">
                       <div className={`dialer-circular-btn ${isCalling ? 'active' : ''}`} onClick={handleCallToggle}>
                         <div className="dialer-ring-outer"></div>
-                        <div className="dialer-ring-inner" style={{ borderColor: isCalling ? 'var(--danger)' : 'var(--accent-green)', boxShadow: isCalling ? '0 0 20px rgba(255, 77, 77, 0.4)' : '0 0 20px var(--accent-green-glow)' }}></div>
-                        <div className="dialer-icon-box" style={{ borderColor: isCalling ? 'var(--danger)' : 'var(--accent-green)', color: isCalling ? 'var(--danger)' : 'var(--accent-green)', background: isCalling ? 'rgba(255, 77, 77, 0.05)' : 'rgba(0, 255, 179, 0.05)' }}>
+                        <div className={`dialer-ring-inner ${isCalling ? 'dialer-ring-inner-dynamic-active' : 'dialer-ring-inner-dynamic-idle'}`}></div>
+                        <div className={`dialer-icon-box ${isCalling ? 'dialer-icon-box-active' : 'dialer-icon-box-idle'}`}>
                           {isCalling ? <PhoneOff size={40} /> : <Phone size={40} />}
                         </div>
                       </div>
                       <div className="waveform-viz mt-8">
                         {[...Array(20)].map((_, i) => (
-                          <div key={i} className="waveform-bar" style={{ animationDelay: `${i * 0.05}s`, height: isCalling ? '30px' : '2px', background: isCalling ? 'var(--danger)' : 'var(--accent-green)' }} />
+                          <div key={i} className={`waveform-bar ${isCalling ? 'waveform-bar-active' : 'waveform-bar-idle'}`} {...{ style: Object.assign({}, { animationDelay: `${i * 0.05}s` }) as any }} />
                         ))}
                       </div>
-                      <div className="hud-label mt-6" style={{ color: isCalling ? 'var(--danger)' : 'var(--accent-green)', fontSize: '0.8rem' }}>
+                      <div className={`hud-label mt-6 ${isCalling ? 'hud-label-active' : 'hud-label-idle'}`}>
                         {isCalling ? 'TERMINATE_ENCRYPTED_CALL' : 'INITIATE_SECURE_CALL'}
                       </div>
                     </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center h-full text-center p-8 opacity-60">
+                    <Users size={48} className="text-neon-gold mb-4 animate-pulse" />
+                    <div className="hud-kicker">AWAITING_OPERATIVE_SELECTION</div>
+                    <p className="text-xs text-muted max-w-xs mt-2 leading-relaxed">No lead is currently active. Select a target from the left list to engage.</p>
                   </div>
                 )}
               </div>
 
               {/* Bottom Bar */}
               <div className="hud-bottom-actions">
-                <div className="hud-action-tab" onClick={() => showToast('Opening WhatsApp...', 'info')}><MessageSquare size={20} /> <span>WHATSAPP</span></div>
-                <div className="hud-action-tab" onClick={() => showToast('Sending Email...', 'info')}><Mail size={20} /> <span>EMAIL</span></div>
-                <div className="hud-action-tab" onClick={() => showToast('Fetching Brochure...', 'info')}><FileText size={20} /> <span>BROCHURE</span></div>
-                <div className="hud-action-tab" onClick={() => showToast('Taking Note...', 'info')}><Edit size={20} /> <span>NOTE</span></div>
+                <div className="hud-action-tab" onClick={() => activeStudent && openWhatsApp(activeStudent)}><MessageSquare size={20} /> <span>WHATSAPP</span></div>
+                <div className="hud-action-tab" onClick={() => activeStudent && openEmail(activeStudent)}><Mail size={20} /> <span>EMAIL</span></div>
+                <div className="hud-action-tab" onClick={() => activeStudent && downloadBrochure(activeStudent)}><FileText size={20} /> <span>BROCHURE</span></div>
+                <div className="hud-action-tab" onClick={focusSessionNotes}><Edit size={20} /> <span>NOTE</span></div>
                 <div className="flex items-center justify-center p-4">
                   <button
                     type="button"
-                    className={`theme-switch ${appSettings.theme === 'gold' || appSettings.theme === 'system' ? 'active' : ''}`}
-                    aria-pressed={appSettings.theme === 'gold' || appSettings.theme === 'system'}
-                    onClick={() => setAppSettings(prev => ({ ...prev, theme: prev.theme === 'gold' ? 'dark' : 'gold' }))}
+                    className={`theme-switch active`}
+                    title="Cycle Theme"
+                    onClick={() => {
+                      const order: AppSettings['theme'][] = ['dark', 'gold', 'silver', 'system'];
+                      const cur = order.indexOf(appSettings.theme);
+                      const next = order[(cur + 1) % order.length];
+                      const labels: Record<string, string> = { dark: 'NEON_EMERALD', gold: 'SOLAR_GOLD', silver: 'LUNAR_SILV', system: 'AUTO_SYNC' };
+                      setAppSettings(prev => ({ ...prev, theme: next }));
+                      showToast(`${labels[next]} DEPLOYED`, 'success');
+                    }}
                   >
-                    <span>THEME ACTIVE</span>
-                    <span className="theme-switch-track"><span className="theme-switch-thumb" /></span>
+                    <span className="theme-label-sublabel">{{
+                      dark: '🟢 NEON_EMERALD',
+                      gold: '☀️ SOLAR_GOLD',
+                      silver: '🌙 LUNAR_SILV',
+                      system: '🔄 AUTO_SYNC',
+                    }[appSettings.theme as string] ?? '🎨 THEME'}</span>
+                    <span className="theme-switch-track"><span /></span>
                   </button>
                 </div>
               </div>
@@ -1114,8 +1372,8 @@ function App() {
                   </div>
                   <div className="flex items-center gap-1 h-12 my-4">
                     {[40, 60, 30, 80, 50, 70, 90, 40, 60, 80, 40, 50, 70, 60, 80].map((h, i) => (
-                      <div key={i} className="flex-1 bg-neon-gold/20 rounded-t-sm relative overflow-hidden" style={{ height: `${h}%` }}>
-                        <div className="absolute bottom-0 left-0 right-0 bg-neon-gold animate-pulse" style={{ height: '30%', opacity: 0.5 }} />
+                      <div key={i} className="flex-1 bg-neon-gold/20 rounded-t-sm relative overflow-hidden activity-bar-pct" {...{ style: Object.assign({}, { height: `${h}%` }) as any }}>
+                        <div className="absolute bottom-0 left-0 right-0 bg-neon-gold animate-pulse activity-bar-fill" />
                       </div>
                     ))}
                   </div>
@@ -1126,7 +1384,7 @@ function App() {
                     </div>
                     <div>
                       <div className="text-[0.6rem] text-muted font-bold">Success Rate</div>
-                      <div className="text-lg font-heading text-success">85%</div>
+                      <div className="text-lg font-heading text-success">{stats.callSuccessRate}%</div>
                     </div>
                   </div>
                 </div>
@@ -1139,26 +1397,27 @@ function App() {
                     <ChevronRight size={14} className="text-muted" />
                   </div>
                   <div className="space-y-4 overflow-y-auto pr-2 custom-scrollbar">
-                    {[
-                      { type: 'connected', name: 'jeelan', time: '10:24:53' },
-                      { type: 'disconnected', name: 'babu', time: '10:23:18' },
-                      { type: 'connected', name: 'gokul', time: '10:22:10' },
-                      { type: 'skipped', name: 'HARI', time: '10:21:11' },
-                      { type: 'connected', name: 'ksk', time: '10:20:05' },
-                    ].map((item, i) => (
-                      <div key={i} className="flex items-center gap-3 py-2 border-b border-white/5">
+                    {(callLogs.length > 0 ? callLogs.slice(0, 8).map(log => ({
+                      type: log.status === 'completed' ? 'connected' as const : 'disconnected' as const,
+                      name: log.studentName,
+                      time: log.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+                      id: log.id,
+                    })) : [
+                      { type: 'disconnected' as const, name: 'No activity yet', time: '--:--:--', id: 'empty' },
+                    ]).map((item) => (
+                      <div key={item.id} className="flex items-center gap-3 py-2 border-b border-white/5">
                         <div className={`w-8 h-8 rounded flex items-center justify-center ${item.type === 'connected' ? 'bg-success/10 text-success' : 'bg-danger/10 text-danger'}`}>
                           {item.type === 'connected' ? <PhoneIncoming size={14} /> : <PhoneOff size={14} />}
                         </div>
                         <div className="flex-1">
-                          <div className="text-[0.65rem] font-bold text-white">Call {item.type.charAt(0).toUpperCase() + item.type.slice(1)}</div>
+                          <div className="text-[0.65rem] font-bold text-white">Call {item.type === 'connected' ? 'Completed' : 'Missed'}</div>
                           <div className="text-[0.6rem] text-muted">{item.name}</div>
                         </div>
                         <div className="text-[0.6rem] font-mono opacity-50 text-white">{item.time}</div>
                       </div>
                     ))}
                   </div>
-                  <button className="btn-neon-outline w-full mt-4" style={{ borderStyle: 'solid', fontSize: '0.6rem' }} onClick={() => navigateTo('logs')}>VIEW ALL ACTIVITY</button>
+                  <button className="btn-neon-outline btn-neon-solid-sm w-full mt-4" onClick={() => navigateTo('logs')}>VIEW ALL ACTIVITY</button>
                 </div>
               )}
 
@@ -1173,456 +1432,419 @@ function App() {
                       <div className="absolute inset-0 bg-neon-gold/5 rounded-lg transform group-hover:rotate-45 transition-transform duration-500"></div>
                       <div className="absolute inset-2 border border-neon-gold/20"></div>
                       <div className="w-8 h-8 bg-neon-gold/20 animate-pulse rounded-sm"></div>
-                      <Zap size={24} className="text-neon-gold absolute animate-bounce" style={{ color: 'var(--neon-gold)' }} />
+                      <Zap size={24} className="text-neon-gold absolute animate-bounce " />
                     </div>
                     <p className="text-[0.65rem] text-muted leading-relaxed">System monitoring and live recruitment metrics will be synchronized here.</p>
                   </div>
-                  <button className="btn-neon w-full" style={{ fontSize: '0.7rem' }} onClick={() => showToast('AI Copilot Initializing...', 'success')}>LAUNCH AI COPILOT</button>
-                </div>
-              )}
+                  <button className="btn-neon w-full" {...{ style: Object.assign({}, { fontSize: '0.7rem' }) as any }} onClick={() => showToast('AI Copilot Initializing...', 'success')}>LAUNCH AI COPILOT</button>
+                </div>)}
             </aside>
           </div>
         )}
 
+
+
         {/* Admissions Drives Tab */}
         {currentTab === 'drives' && (
-          <motion.div initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} className="tab-content" style={{ padding: isMobile ? '10px' : '24px' }}>
-            {viewingDrive ? (
-              <div className="flex flex-col h-full">
-                <div className="campaign-header-tactical mb-6">
-                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                    {/* LEFT: Title & Back Button */}
-                    <div className="flex items-center gap-4">
+          viewingDrive ? (
+            <div className="workspace">
+              {/* Left Column: Drive Leads */}
+              <section className={`panel list-panel ${isMobile && mobileViewMode === 'detail' ? 'mobile-hidden' : ''}`}>
+                <div className="p-6 h-full flex flex-col">
+                  <div className="contacts-panel-header mb-6">
+                    <div className="flex items-center gap-3">
                       <motion.button
                         whileHover={{ scale: 1.1, x: -2 }}
                         whileTap={{ scale: 0.9 }}
                         className="hud-icon-btn small shrink-0"
-                        onClick={() => setViewingDrive(null)}
+                        onClick={() => { setViewingDrive(null); setActiveStudent(null); }}
+                        title="Back to Drives"
                       >
-                        <ChevronLeft size={18} />
+                        <ChevronLeft size={16} />
                       </motion.button>
-                      <div className="min-w-0">
-                        <div className="hud-kicker truncate">ACTIVE_CAMPAIGN</div>
-                        <h2 className="hud-value-md m-0 truncate" style={{ fontSize: isMobile ? '1.4rem' : '1.8rem', fontFamily: 'var(--font-heading)' }}>{viewingDrive.name}</h2>
+                      <div className="min-w-0 flex-1">
+                        <div className="hud-kicker truncate">ACTIVE_DRIVE</div>
+                        <h2 className="truncate" {...{ style: Object.assign({}, { margin: 0, fontSize: '1.25rem', fontFamily: 'var(--font-heading)' }) as any }}>{viewingDrive.name}</h2>
+                        <p>{students.filter(s => viewingDrive.contactIds.includes(s.id)).length} active leads</p>
                       </div>
-                    </div>
-
-                    {/* RIGHT/BOTTOM: Actions & Search */}
-                    <div className={`flex ${isMobile ? 'flex-col gap-3' : 'items-center gap-2'}`} style={{ position: 'relative' }}>
-                      {/* Search Bar */}
-                      <div className="search-box tactical" style={{ width: isMobile ? '100%' : '280px' }}>
-                        <input
-                          type="text"
-                          placeholder="SEARCH_LEADS..."
-                          className="search-input"
-                          value={driveContactSearchTerm}
-                          onChange={(e) => setDriveContactSearchTerm(e.target.value)}
-                        />
-                        <div className="search-btn"><Search size={14} /></div>
-                      </div>
-
-                      {/* Action Buttons */}
-                      <div className={`flex gap-2 ${isMobile ? 'justify-end w-full' : ''}`}>
-                        <button
-                          className={`hud-icon-btn ${autoDialEnabled ? 'active' : ''}`}
-                          onClick={() => setAutoDialEnabled(!autoDialEnabled)}
-                          title="Auto Dialer"
-                          style={{ position: 'relative', flex: isMobile ? 1 : 'none' }}
-                        >
-                          <Power size={18} />
-                          {isMobile && <span className="ml-2 text-[0.6rem] font-bold tracking-widest uppercase">Auto_Dial</span>}
-                          {autoDialEnabled && (
-                            <motion.div
-                              animate={{ scale: [1, 1.2, 1], opacity: [0.5, 1, 0.5] }}
-                              transition={{ duration: 2, repeat: Infinity }}
-                              style={{ position: 'absolute', top: -2, right: -2, width: 8, height: 8, borderRadius: '50%', background: 'var(--success-green)', border: '1px solid #000' }}
-                            />
-                          )}
-                        </button>
-
-                        <button
-                          className="hud-icon-btn"
-                          onClick={() => setIsAddContactModalOpen(true)}
-                          title="Add Contacts"
-                          style={{ flex: isMobile ? 1 : 'none' }}
-                        >
-                          <UserPlus size={18} />
-                          {isMobile && <span className="ml-2 text-[0.6rem] font-bold tracking-widest uppercase">Add_Lead</span>}
-                        </button>
-
-                        <button
-                          className={`hud-icon-btn ${isDriveFilterOpen || driveFilterGender || driveFilterCourse || driveFilterBatch ? 'active' : ''}`}
-                          onClick={() => setIsDriveFilterOpen(!isDriveFilterOpen)}
-                          title="Filter Leads"
-                          style={{ position: 'relative', zIndex: 1001, flex: isMobile ? 1 : 'none' }}
-                        >
-                          <Database size={18} />
-                          {isMobile && <span className="ml-2 text-[0.6rem] font-bold tracking-widest uppercase">Filter</span>}
-                        </button>
-                      </div>
-
-                      <AnimatePresence>
-                        {isDriveFilterOpen && (
-                          <motion.div
-                            initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                            animate={{ opacity: 1, y: 0, scale: 1 }}
-                            exit={{ opacity: 0, y: 10, scale: 0.95 }}
-                            className="settings-card-tactical"
-                            style={{
-                              position: 'absolute',
-                              top: '100%',
-                              right: 0,
-                              zIndex: 1000,
-                              width: '280px',
-                              marginTop: '12px',
-                              padding: '1.25rem',
-                              border: '1px solid var(--neon-gold)',
-                              boxShadow: '0 15px 40px rgba(0,0,0,0.8), 0 0 20px rgba(212, 175, 55, 0.1)'
-                            }}
-                          >
-                            <div className="flex justify-between items-center mb-5 border-b border-white/5 pb-3">
-                              <span className="hud-kicker" style={{ color: 'var(--neon-gold)', letterSpacing: '2px' }}>FILTER_LEADS</span>
-                              {(driveFilterGender || driveFilterCourse || driveFilterBatch) && (
-                                <button
-                                  onClick={() => { setDriveFilterGender(''); setDriveFilterCourse(''); setDriveFilterBatch(''); }}
-                                  style={{ fontSize: '0.6rem', color: 'var(--danger)', background: 'transparent', border: 'none', cursor: 'pointer', fontWeight: 800 }}
-                                >
-                                  RESET_ALL
-                                </button>
-                              )}
-                            </div>
-
-                            <div className="flex flex-col gap-5">
-                              <div className="flex flex-col gap-2">
-                                <div className="flex items-center gap-2 opacity-50">
-                                  <Users size={12} />
-                                  <span className="hud-kicker" style={{ fontSize: '0.5rem' }}>GENDER_TYPE</span>
-                                </div>
-                                <select
-                                  className="settings-input-tactical w-full"
-                                  value={driveFilterGender}
-                                  onChange={(e) => setDriveFilterGender(e.target.value)}
-                                  style={{ fontSize: '0.75rem', height: '40px' }}
-                                >
-                                  <option value="">ALL_GENDERS</option>
-                                  <option value="Male">MALE</option>
-                                  <option value="Female">FEMALE</option>
-                                  <option value="Other">OTHER</option>
-                                </select>
-                              </div>
-
-                              <div className="flex flex-col gap-2">
-                                <div className="flex items-center gap-2 opacity-50">
-                                  <LayoutGrid size={12} />
-                                  <span className="hud-kicker" style={{ fontSize: '0.5rem' }}>COURSE_CODE</span>
-                                </div>
-                                <select
-                                  className="settings-input-tactical w-full"
-                                  value={driveFilterCourse}
-                                  onChange={(e) => setDriveFilterCourse(e.target.value)}
-                                  style={{ fontSize: '0.75rem', height: '40px' }}
-                                >
-                                  <option value="">ALL_COURSES</option>
-                                  {Array.from(new Set(students.map(s => s.course))).filter(Boolean).map(course => (
-                                    <option key={course} value={course}>{course.toUpperCase()}</option>
-                                  ))}
-                                </select>
-                              </div>
-
-                              <div className="flex flex-col gap-2">
-                                <div className="flex items-center gap-2 opacity-50">
-                                  <Clock size={12} />
-                                  <span className="hud-kicker" style={{ fontSize: '0.5rem' }}>BATCH_YEAR</span>
-                                </div>
-                                <select
-                                  className="settings-input-tactical w-full"
-                                  value={driveFilterBatch}
-                                  onChange={(e) => setDriveFilterBatch(e.target.value)}
-                                  style={{ fontSize: '0.75rem', height: '40px' }}
-                                >
-                                  <option value="">ALL_YEARS</option>
-                                  {Array.from(new Set(students.map(s => s.year))).filter(Boolean).sort().map(year => (
-                                    <option key={year} value={year}>{year}</option>
-                                  ))}
-                                </select>
-                              </div>
-                            </div>
-
-                            <div className="mt-6 pt-4 border-t border-white/5">
-                              <button
-                                className="btn btn-primary btn-glow w-full py-2"
-                                style={{ fontSize: '0.7rem' }}
-                                onClick={() => setIsDriveFilterOpen(false)}
-                              >
-                                APPLY_FILTERS
-                              </button>
-                            </div>
-                          </motion.div>
-                        )}
-                      </AnimatePresence>
                     </div>
                   </div>
-                </div>
 
-                <div className="workspace" style={{ padding: 0, display: 'flex', overflow: 'hidden', height: isMobile ? 'calc(100vh - 130px)' : 'calc(100vh - 200px)' }}>
-                  <section className={`list-panel ${isMobile && mobileViewMode === 'detail' ? 'mobile-hidden' : ''}`} style={{ width: isMobile ? '100%' : '350px', borderRight: isMobile ? 'none' : '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', height: '100%' }}>
-                    <div className="student-list" style={{ flex: 1, overflowY: 'auto', padding: '1rem' }}>
-                      {students
-                        .filter(s => viewingDrive.contactIds.includes(s.id))
-                        .filter(s => {
-                          const matchesSearch = s.name.toLowerCase().includes(driveContactSearchTerm.toLowerCase()) ||
-                            s.course.toLowerCase().includes(driveContactSearchTerm.toLowerCase());
-                          const matchesGender = !driveFilterGender || s.gender === driveFilterGender;
-                          const matchesCourse = !driveFilterCourse || s.course === driveFilterCourse;
-                          const matchesBatch = !driveFilterBatch || s.year === driveFilterBatch;
-                          return matchesSearch && matchesGender && matchesCourse && matchesBatch;
-                        })
-                        .map((student, index) => (
-                          <motion.div
-                            initial={{ opacity: 0, x: -20 }}
-                            animate={{ opacity: 1, x: 0 }}
-                            transition={{ delay: index * 0.02 }}
-                            key={student.id}
-                            className={`student-card-hud ${activeStudent?.id === student.id ? 'active' : ''}`}
-                            onClick={() => handleStudentSelect(student)}
-                            style={{
-                              marginBottom: '10px',
-                              position: 'relative',
-                              overflow: 'hidden'
-                            }}
-                            onContextMenu={(e) => {
-                              e.preventDefault();
-                              setContextMenu({ x: e.pageX, y: e.pageY, student, driveId: viewingDrive.id });
-                            }}
-                          >
-                            {activeStudent?.id === student.id && (
-                              <div style={{ position: 'absolute', top: 0, left: 0, bottom: 0, width: '2px', background: 'var(--neon-gold)' }} />
-                            )}
-
-                            <div className="avatar-hud-wrap" style={{ width: '42px', height: '42px', borderRadius: '4px', overflow: 'hidden', border: '1px solid rgba(212, 175, 55, 0.2)' }}>
-                              <img src={student.avatar} alt={student.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                            </div>
-
-                            <div className="flex-1 min-w-0 ml-3">
-                              <div className="flex justify-between items-start">
-                                <h4 style={{ margin: 0, fontSize: '0.85rem', color: '#fff', fontWeight: 700, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{student.name}</h4>
-                              </div>
-                              <p style={{ margin: '2px 0 0', fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 600 }}>{student.course}</p>
-
-                              <div className="flex items-center gap-2 mt-2">
-                                <span className={`badge-${student.status === 'new' ? 'hud' : 'contacted'}`} style={{ fontSize: '0.55rem', padding: '1px 6px' }}>
-                                  {student.status.toUpperCase()}
-                                </span>
-                                {student.notes && <Activity size={10} style={{ color: 'var(--neon-gold)', opacity: 0.4 }} />}
-                              </div>
-                            </div>
-
-                            {activeStudent?.id === student.id && (
-                              <div className="ml-2">
-                                <ChevronRight size={14} color="var(--neon-gold)" />
-                              </div>
-                            )}
-                          </motion.div>
-                        ))}
+                  {/* Filter and Action Controls Cluster */}
+                  <div className="flex gap-2 mb-4" {...{ style: Object.assign({}, { position: 'relative' }) as any }}>
+                    <div className="search-box flex-1">
+                      <input
+                        type="text"
+                        className="search-input"
+                        placeholder="Search leads..."
+                        value={driveContactSearchTerm}
+                        onChange={(e) => setDriveContactSearchTerm(e.target.value)}
+                      />
+                      <button className="search-btn" title="Search"><Search size={16} /></button>
                     </div>
-                  </section>
+                    <button
+                      className={`hud-icon-btn small ${autoDialEnabled ? 'active' : ''}`}
+                      onClick={() => setAutoDialEnabled(!autoDialEnabled)}
+                      title="Auto Dialer"
+                    >
+                      <Power size={16} />
+                    </button>
 
-                  {activeStudent && (
-                    <section className={`action-panel ${isMobile && mobileViewMode === 'list' ? 'mobile-hidden' : ''}`} style={{
-                      flex: 1,
-                      display: 'flex',
-                      flexDirection: 'column',
-                      height: '100%',
-                      overflowY: 'auto',
-                      background: 'linear-gradient(180deg, #050505, #0a0a0c)',
-                      position: 'relative',
-                      borderLeft: isMobile ? 'none' : '1px solid rgba(212, 175, 55, 0.15)'
-                    }}>
-                      {/* TACTICAL OVERLAY ELEMENTS */}
-                      <div style={{ position: 'absolute', top: 20, right: 20, opacity: 0.3, pointerEvents: 'none' }}>
-                        <div className="hud-kicker" style={{ fontSize: '0.5rem', textAlign: 'right' }}>OBJECTIVE_ID: {activeStudent.id.substring(0, 8)}</div>
-                        <div className="hud-kicker" style={{ fontSize: '0.4rem', textAlign: 'right' }}>COORD: 12.9716° N, 77.5946° E</div>
-                      </div>
+                    <button
+                      className="hud-icon-btn small"
+                      onClick={() => setIsAddContactModalOpen(true)}
+                      title="Add Contacts"
+                    >
+                      <UserPlus size={16} />
+                    </button>
 
-                      {/* TACTICAL HUD HEADER */}
-                      <div className="action-header" style={{ padding: '2rem', background: 'linear-gradient(to bottom, rgba(212, 175, 55, 0.05), transparent)' }}>
-                        <div className="flex gap-6 items-start">
-                          <div className="hud-avatar-outer-glow" style={{ width: '80px', height: '80px', borderRadius: '12px', padding: '2px' }}>
-                            <div className="hud-avatar-inner-wrap" style={{ width: '100%', height: '100%', borderRadius: '10px', overflow: 'hidden' }}>
-                              <img src={activeStudent.avatar} alt={activeStudent.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                            </div>
+                    <button
+                      className={`hud-icon-btn small ${isDriveFilterOpen || driveFilterGender || driveFilterCourse || driveFilterBatch ? 'active' : ''}`}
+                      onClick={() => setIsDriveFilterOpen(!isDriveFilterOpen)}
+                      title="Filter Leads"
+                      {...{ style: Object.assign({}, { zIndex: 1001 }) as any }}
+                    >
+                      <Database size={16} />
+                    </button>
+
+                    <AnimatePresence>
+                      {isDriveFilterOpen && (
+                        <motion.div
+                          initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                          animate={{ opacity: 1, y: 0, scale: 1 }}
+                          exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                          className="settings-card-tactical drive-filter-dropdown"
+                        >
+                          <div className="flex justify-between items-center mb-5 border-b border-white/5 pb-3">
+                            <span className="hud-kicker" >FILTER_LEADS</span>
+                            {(driveFilterGender || driveFilterCourse || driveFilterBatch) && (
+                              <button
+                                onClick={() => { setDriveFilterGender(''); setDriveFilterCourse(''); setDriveFilterBatch(''); }}
+                                className="filter-reset-btn"
+                              >
+                                RESET_ALL
+                              </button>
+                            )}
                           </div>
 
-                          <div className="action-details" style={{ flex: 1 }}>
-                            <div className="flex justify-between items-start">
-                              <div>
-                                <div className="hud-kicker" style={{ color: 'var(--neon-gold)', marginBottom: '4px' }}>CAMPAIGN_CONTACT</div>
-                                <h2 className="hud-value-lg" style={{ fontSize: '1.8rem', margin: 0, lineHeight: 1.1 }}>{activeStudent.name.toUpperCase()}</h2>
+                          <div className="flex flex-col gap-5">
+                            <div className="flex flex-col gap-2">
+                              <div className="flex items-center gap-2 opacity-50">
+                                <Users size={12} />
+                                <span className="hud-kicker" {...{ style: Object.assign({}, { fontSize: '0.5rem' }) as any }}>GENDER_TYPE</span>
                               </div>
-                              <div className="flex flex-col items-end">
-                                <span className={`badge ${activeStudent.status === 'new' ? 'badge-new' : 'badge-contacted'}`} style={{ fontSize: '0.6rem' }}>
-                                  {activeStudent.status.toUpperCase()}
-                                </span>
-                                <span style={{ color: 'var(--text-muted)', fontSize: '0.65rem', marginTop: '4px', fontWeight: 800 }}>{activeStudent.course}</span>
-                              </div>
+                              <select
+                                title="Filter by gender"
+                                className="settings-input-tactical w-full filter-select-tactical"
+                                value={driveFilterGender}
+                                onChange={(e) => setDriveFilterGender(e.target.value)}
+                              >
+                                <option value="">ALL_GENDERS</option>
+                                <option value="Male">MALE</option>
+                                <option value="Female">FEMALE</option>
+                                <option value="Other">OTHER</option>
+                              </select>
                             </div>
 
-                            <div className="mt-4 flex gap-4">
-                              <div className="flex flex-col">
-                                <span className="hud-kicker" style={{ fontSize: '0.5rem', opacity: 0.5 }}>CONTACT_METHOD</span>
-                                <span className="hud-value-sm" style={{ fontSize: '0.8rem', color: 'var(--neon-gold)' }}>{activeStudent.phoneNumbers[0]?.number || 'NO_DATA'}</span>
+                            <div className="flex flex-col gap-2">
+                              <div className="flex items-center gap-2 opacity-50">
+                                <LayoutGrid size={12} />
+                                <span className="hud-kicker" {...{ style: Object.assign({}, { fontSize: '0.5rem' }) as any }}>COURSE_CODE</span>
                               </div>
-                              <div className="w-px h-8 bg-white/10" />
-                              <div className="flex flex-col">
-                                <span className="hud-kicker" style={{ fontSize: '0.5rem', opacity: 0.5 }}>BATCH_REF</span>
-                                <span className="hud-value-sm" style={{ fontSize: '0.8rem' }}>CLASS_{activeStudent.year || '2024'}</span>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* DIAL HUB - REDESIGNED CIRCULAR */}
-                      <div className="hud-dialer-container" style={{ flex: 1, padding: '2rem 0' }}>
-                        <div style={{ position: 'relative' }}>
-                          <motion.button
-                            whileHover={{ scale: 1.05 }}
-                            whileTap={{ scale: 0.95 }}
-                            className="dialer-circular-btn"
-                            onClick={handleCallToggle}
-                            style={{
-                              width: '180px',
-                              height: '180px',
-                              background: isCalling
-                                ? 'radial-gradient(circle, rgba(255, 77, 90, 0.2), rgba(5, 5, 5, 0.95))'
-                                : 'radial-gradient(circle, rgba(212, 175, 55, 0.15), rgba(5, 5, 5, 0.95))',
-                              border: isCalling ? '1px solid var(--danger)' : '1px solid var(--neon-gold)',
-                              boxShadow: isCalling ? '0 0 40px rgba(255, 77, 90, 0.2)' : '0 0 40px rgba(212, 175, 55, 0.1)'
-                            }}
-                          >
-                            <div className="dialer-ring-outer" style={{ borderStyle: isCalling ? 'solid' : 'dashed', borderColor: isCalling ? 'var(--danger)' : 'var(--neon-gold)' }} />
-                            <div className="dialer-ring-inner" style={{ borderColor: isCalling ? 'var(--danger)' : 'var(--accent-green)' }} />
-
-                            <div className="dialer-icon-box" style={{
-                              background: isCalling ? 'rgba(255, 77, 90, 0.1)' : 'rgba(0, 255, 178, 0.05)',
-                              boxShadow: isCalling ? 'inset 0 0 20px rgba(255, 77, 90, 0.2)' : 'inset 0 0 20px rgba(0, 255, 178, 0.1)'
-                            }}>
-                              {isCalling ? <PhoneOff size={48} color="var(--danger)" /> : <Phone size={48} color="var(--accent-green)" />}
-                            </div>
-                          </motion.button>
-
-                          {isCalling && (
-                            <div className="absolute -bottom-12 left-1/2 -translate-x-1/2 flex flex-col items-center">
-                              <div className="waveform-viz">
-                                {[1, 2, 3, 4, 5, 4, 3, 2, 1].map((_, i) => (
-                                  <motion.div
-                                    key={i}
-                                    className="waveform-bar"
-                                    animate={{ height: [10, 30, 10] }}
-                                    transition={{ duration: 0.5, repeat: Infinity, delay: i * 0.1 }}
-                                    style={{ background: 'var(--danger)', width: '3px' }}
-                                  />
+                              <select
+                                title="Filter by course"
+                                className="settings-input-tactical w-full filter-select-tactical"
+                                value={driveFilterCourse}
+                                onChange={(e) => setDriveFilterCourse(e.target.value)}
+                              >
+                                <option value="">ALL_COURSES</option>
+                                {Array.from(new Set(students.map(s => s.course))).filter(Boolean).map(course => (
+                                  <option key={course} value={course}>{course.toUpperCase()}</option>
                                 ))}
-                              </div>
-                              <div className="hud-value-lg mt-2" style={{ fontSize: '1.2rem', color: 'var(--danger)' }}>{formatTime(callDuration)}</div>
+                              </select>
                             </div>
-                          )}
-                        </div>
 
-                        <div className="mt-12 text-center">
-                          <div className="hud-kicker" style={{ fontSize: '0.7rem', color: isCalling ? 'var(--danger)' : 'var(--text-secondary)' }}>
-                            {isCalling ? 'LIVE_COMM_LINK_ACTIVE' : 'READY_FOR_ENGAGEMENT'}
+                            <div className="flex flex-col gap-2">
+                              <div className="flex items-center gap-2 opacity-50">
+                                <Clock size={12} />
+                                <span className="hud-kicker" {...{ style: Object.assign({}, { fontSize: '0.5rem' }) as any }}>BATCH_YEAR</span>
+                              </div>
+                              <select
+                                title="Filter by batch year"
+                                className="settings-input-tactical w-full filter-select-tactical"
+                                value={driveFilterBatch}
+                                onChange={(e) => setDriveFilterBatch(e.target.value)}
+                              >
+                                <option value="">ALL_YEARS</option>
+                                {Array.from(new Set(students.map(s => s.year))).filter(Boolean).sort().map(year => (
+                                  <option key={year} value={year}>{year}</option>
+                                ))}
+                              </select>
+                            </div>
                           </div>
-                          <div className="hud-value-sm mt-1" style={{ letterSpacing: '2px', opacity: 0.5 }}>
-                            {isCalling ? 'SCANNING_FEEDBACK...' : 'INITIATE_TACTICAL_CALL'}
-                          </div>
-                        </div>
-                      </div>
 
-                      {/* QUICK COMMS BAR */}
-                      <div className="px-8 pb-4">
-                        <div className="flex gap-3">
-                          <button
-                            className="btn-neon-outline flex-1"
-                            style={{ height: '50px', background: 'rgba(37, 211, 102, 0.05)', borderColor: 'rgba(37, 211, 102, 0.3)' }}
-                            onClick={() => {
-                              const num = activeStudent.phoneNumbers[0]?.number;
-                              if (num) window.open(`https://wa.me/${num.replace(/\D/g, '')}?text=${getFormattedMessage(activeStudent)}`, '_blank');
-                            }}
-                          >
-                            <MessageSquare size={18} style={{ color: '#25D366' }} />
-                            <span style={{ color: '#25D366', fontSize: '0.7rem' }}>WHATSAPP_LINK</span>
-                          </button>
-
-                          <button
-                            className="btn-neon-outline flex-1"
-                            style={{ height: '50px', background: 'rgba(212, 175, 55, 0.05)', borderColor: 'rgba(212, 175, 55, 0.3)' }}
-                            onClick={() => {
-                              if (activeStudent.email) window.open(`mailto:${activeStudent.email}`, '_self');
-                            }}
-                          >
-                            <Mail size={18} />
-                            <span style={{ fontSize: '0.7rem' }}>EMAIL_DISPATCH</span>
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* SESSION INTEL (NOTES) */}
-                      <div className="p-8 pt-4 mt-auto" style={{ borderTop: '1px solid rgba(255, 255, 255, 0.05)', background: 'rgba(0, 0, 0, 0.2)' }}>
-                        <div className="flex justify-between items-center mb-4">
-                          <div className="flex items-center gap-2">
-                            <div className="w-1 h-3 bg-neon-gold" />
-                            <span className="hud-kicker" style={{ fontSize: '0.6rem', color: 'var(--neon-gold)' }}>SESSION_REMARKS_LOG</span>
+                          <div className="mt-6 pt-4 border-t border-white/5">
+                            <button
+                              className="btn btn-primary btn-glow w-full py-2 filter-apply-btn"
+                              onClick={() => setIsDriveFilterOpen(false)}
+                            >
+                              APPLY_FILTERS
+                            </button>
                           </div>
-                          <button
-                            className="btn-primary"
-                            onClick={() => { updateStudentInList(activeStudent); showToast('Intel Synchronized', 'success'); }}
-                            style={{ height: '28px', padding: '0 12px', fontSize: '0.55rem', borderRadius: '4px' }}
-                          >
-                            <Save size={12} /> SYNC_LOG
-                          </button>
-                        </div>
-                        <div style={{ position: 'relative' }}>
-                          <textarea
-                            style={{
-                              width: '100%',
-                              height: '100px',
-                              background: '#050505',
-                              border: '1px solid rgba(212, 175, 55, 0.15)',
-                              borderRadius: '4px',
-                              color: '#d1d1d1',
-                              padding: '12px',
-                              fontSize: '0.75rem',
-                              fontFamily: 'var(--font-mono)',
-                              resize: 'none',
-                              boxShadow: 'inset 0 0 15px rgba(0,0,0,0.5)'
-                            }}
-                            value={activeStudent.notes}
-                            onChange={(e) => updateStudentInList({ ...activeStudent, notes: e.target.value })}
-                            placeholder="Enter interaction intelligence..."
-                          />
-                          <div style={{ position: 'absolute', bottom: '8px', right: '12px', pointerEvents: 'none' }}>
-                            <Activity size={12} style={{ color: 'var(--neon-gold)', opacity: 0.2 }} />
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+
+                  <div className="student-list flex-1 overflow-y-auto pr-1">
+                    {students
+                      .filter(s => viewingDrive.contactIds.includes(s.id))
+                      .filter(s => {
+                        const matchesSearch = s.name.toLowerCase().includes(driveContactSearchTerm.toLowerCase()) ||
+                          s.course.toLowerCase().includes(driveContactSearchTerm.toLowerCase());
+                        const matchesGender = !driveFilterGender || s.gender === driveFilterGender;
+                        const matchesCourse = !driveFilterCourse || s.course === driveFilterCourse;
+                        const matchesBatch = !driveFilterBatch || s.year === driveFilterBatch;
+                        return matchesSearch && matchesGender && matchesCourse && matchesBatch;
+                      })
+                      .map((student) => (
+                        <div
+                          key={student.id}
+                          className={`student-card-hud student-card-inner ${activeStudent?.id === student.id ? 'active is-active' : 'is-inactive'}`}
+                          onClick={() => handleStudentSelect(student)}
+                        >
+                          <div className={`avatar-hud-wrap avatar-hud-circle ${activeStudent?.id === student.id ? 'is-active' : 'is-inactive'}`}>
+                            <div className="w-full h-full rounded-full flex items-center justify-center bg-zinc-900 font-bold text-xs avatar-initials">
+                              {student.name.split(' ').map(n => n[0]).join('').toUpperCase().substring(0, 2)}
+                            </div>
                           </div>
+                          <div className="flex-1 min-w-0">
+                            <h4 {...{ style: Object.assign({}, { margin: 0, fontSize: '0.85rem', color: activeStudent?.id === student.id ? 'var(--neon-gold)' : '#fff' }) as any }}>{student.name}</h4>
+                            <p {...{ style: Object.assign({}, { margin: 0, fontSize: '0.7rem', color: 'var(--text-muted)' }) as any }}>{student.course}</p>
+                          </div>
+                          <span className={`badge-hud badge-${student.status}`} {...{ style: Object.assign({}, { fontSize: '0.6rem', padding: '2px 6px' }) as any }}>{student.status.toUpperCase()}</span>
                         </div>
-                      </div>
-                    </section>
+                      ))}
+                  </div>
+                  {!isMobile && (
+                    <button className="btn-neon-outline btn-solid-border w-full mt-4" onClick={() => setIsAddContactModalOpen(true)}>+ DEPLOY NEW LEADS</button>
                   )}
                 </div>
-              </div>
-            ) : (
+              </section>
+
+              {/* Middle Column: Profile & Dialer */}
+              <section className={`profile-panel ${isMobile && mobileViewMode === 'list' ? 'mobile-hidden' : ''}`}>
+                <div className="flex-1 overflow-y-auto profile-scroll-no-bar">
+                  {activeStudent ? (
+                    <div className="p-8">
+                      {isMobile && (
+                        <button type="button" className="mobile-back-to-list" onClick={() => setMobileViewMode('list')}>
+                          <ChevronLeft size={18} />
+                          Drive Leads
+                        </button>
+                      )}
+                      {/* Header Card */}
+                      <div className="flex items-center gap-8 mb-12">
+                        <div className="hud-avatar-outer-glow hud-avatar-outer">
+                          <div className="hud-avatar-inner-wrap hud-avatar-inner">
+                            <div className="w-full h-full flex items-center justify-center bg-black text-3xl font-black profile-initials">
+                              {activeStudent.name.split(' ').map(n => n[0]).join('').toUpperCase().substring(0, 2)}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex-1">
+                          <div className="hud-tag-label profile-tag-label">DRIVE_LEAD</div>
+                          <h2 className="hud-value-lg profile-name">{activeStudent.name}</h2>
+                          <div className="flex items-center gap-3">
+                            <span className="badge-hud badge-new">{activeStudent.status.toUpperCase()}</span>
+                            <span className="profile-course-text">{activeStudent.course}</span>
+                          </div>
+                        </div>
+                        <div className="flex gap-2">
+                          <button className="btn-neon-outline" onClick={skipToNext} title="Skip to next lead"><SkipForward size={14} /> SKIP</button>
+                          <button className="btn-neon-outline" onClick={() => openEditContactModal(activeStudent)} title="Modify current lead"><Edit size={14} /> EDIT</button>
+                          <button className="btn-neon-outline btn-neon-danger" onClick={() => { deleteStudent(activeStudent.id); setActiveStudent(null); }} title="Erase lead permanently"><Trash size={14} /> DELETE</button>
+                        </div>
+                      </div>
+
+                      {/* Channels */}
+                      <div className="hud-label mb-4">COMM_CHANNELS</div>
+                      <div className="hud-card hud-card-gold-border mb-12">
+                        <div className="flex items-center gap-6">
+                          <div className="w-10 h-10 rounded bg-gold-glow-soft flex items-center justify-center text-gold phone-icon-gold"><Phone size={20} /></div>
+                          <div className="flex-1">
+                            <div className="text-[0.6rem] text-muted font-bold">MOBILE</div>
+                            <div className="text-xl font-mono tracking-widest text-white">{activeStudent.phoneNumbers[0]?.number}</div>
+                          </div>
+                          <div className="flex gap-2"><MoreHorizontal size={20} /></div>
+                        </div>
+                      </div>
+
+                      {/* Central Dialer */}
+                      <div className="hud-dialer-container py-12">
+                        <div className={`dialer-circular-btn ${isCalling ? 'active' : ''}`} onClick={handleCallToggle}>
+                          <div className="dialer-ring-outer"></div>
+                          <div className={`dialer-ring-inner ${isCalling ? 'dialer-ring-inner-dynamic-active' : 'dialer-ring-inner-dynamic-idle'}`}></div>
+                          <div className={`dialer-icon-box ${isCalling ? 'dialer-icon-box-active' : 'dialer-icon-box-idle'}`}>
+                            {isCalling ? <PhoneOff size={40} /> : <Phone size={40} />}
+                          </div>
+                        </div>
+                        <div className="waveform-viz mt-8">
+                          {[...Array(20)].map((_, i) => (
+                            <div key={i} className={`waveform-bar ${isCalling ? 'waveform-bar-active' : 'waveform-bar-idle'}`} {...{ style: Object.assign({}, { animationDelay: `${i * 0.05}s` }) as any }} />
+                          ))}
+                        </div>
+                        <div className={`hud-label mt-6 ${isCalling ? 'hud-label-active' : 'hud-label-idle'}`}>
+                          {isCalling ? 'TERMINATE_ENCRYPTED_CALL' : 'INITIATE_SECURE_CALL'}
+                        </div>
+                      </div>
+
+                      {/* Session Intelligence */}
+                      <div className="hud-label mb-4">INTERACTION_INTELLIGENCE</div>
+                      <div className="hud-card mb-12 p-0 relative overflow-hidden group">
+                        <div className="absolute top-0 left-0 right-0 h-[1px] bg-gradient-to-r from-transparent via-neon-gold/30 to-transparent" />
+                        <div className="p-6">
+                          <textarea
+                            className="w-full bg-black/60 border border-white/10 rounded focus:border-neon-gold/50 focus:outline-none custom-scrollbar transition-all"
+                            {...{
+                              style: Object.assign({}, {
+                                height: '120px',
+                                borderRadius: '4px',
+                                color: '#d1d1d1',
+                                padding: '12px',
+                                fontSize: '0.75rem',
+                                fontFamily: 'var(--font-mono)',
+                                resize: 'none'
+                              }) as any
+                            }}
+                            id="session-notes-textarea"
+                            ref={notesRef}
+                            key={activeStudent.id}
+                            defaultValue={activeStudent.notes}
+                            onBlur={() => updateStudentInList({ ...activeStudent, notes: notesRef.current?.value ?? activeStudent.notes }) as any}
+                            placeholder="Enter interaction intelligence..."
+                          />
+                          <div className="session-notes-icon">
+                            <Activity size={12} className="notes-icon" />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center justify-center h-full text-center p-8 opacity-60">
+                      <Users size={48} className="text-neon-gold mb-4 animate-pulse" />
+                      <div className="hud-kicker">NO_ACTIVE_DRIVE_LEAD</div>
+                      <p className="text-xs text-muted max-w-xs mt-2 leading-relaxed">No campaign lead is currently selected. Focus a contact from the left column to launch communications.</p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Bottom Bar */}
+                <div className="hud-bottom-actions">
+                  <div className="hud-action-tab" onClick={() => activeStudent && openWhatsApp(activeStudent)}><MessageSquare size={20} /> <span>WHATSAPP</span></div>
+                  <div className="hud-action-tab" onClick={() => activeStudent && openEmail(activeStudent)}><Mail size={20} /> <span>EMAIL</span></div>
+                  <div className="hud-action-tab" onClick={() => activeStudent && downloadBrochure(activeStudent)}><FileText size={20} /> <span>BROCHURE</span></div>
+                  <div className="hud-action-tab" onClick={focusSessionNotes}><Edit size={20} /> <span>NOTE</span></div>
+                  <div className="flex items-center justify-center p-4">
+                    <button
+                      type="button"
+                      className={`theme-switch active`}
+                      title="Cycle Theme"
+                      onClick={() => {
+                        const order: AppSettings['theme'][] = ['dark', 'gold', 'silver', 'system'];
+                        const cur = order.indexOf(appSettings.theme);
+                        const next = order[(cur + 1) % order.length];
+                        const labels: Record<string, string> = { dark: 'NEON_EMERALD', gold: 'SOLAR_GOLD', silver: 'LUNAR_SILV', system: 'AUTO_SYNC' };
+                        setAppSettings(prev => ({ ...prev, theme: next }));
+                        showToast(`${labels[next]} DEPLOYED`, 'success');
+                      }}
+                    >
+                      <span className="theme-label-sublabel">{{
+                        dark: '🟢 NEON_EMERALD',
+                        gold: '☀️ SOLAR_GOLD',
+                        silver: '🌙 LUNAR_SILV',
+                        system: '🔄 AUTO_SYNC',
+                      }[appSettings.theme as string] ?? '🎨 THEME'}</span>
+                      <span className="theme-switch-track"><span /></span>
+                    </button>
+                  </div>
+                </div>
+              </section>
+
+              {/* Right Column: Telemetry Panel */}
+              <aside className="panel utility-panel">
+                {!isMobile && (
+                  <div className="hud-card">
+                    <div className="flex items-center justify-between mb-4">
+                      <div className="hud-label flex items-center gap-2"><BarChart3 size={14} /> SESSION_ACTIVITY</div>
+                      <ChevronRight size={14} className="text-muted" />
+                    </div>
+                    <div className="flex items-center gap-1 h-12 my-4">
+                      {[40, 60, 30, 80, 50, 70, 90, 40, 60, 80, 40, 50, 70, 60, 80].map((h, i) => (
+                        <div key={i} className="flex-1 bg-neon-gold/20 rounded-t-sm relative overflow-hidden activity-bar-pct" {...{ style: Object.assign({}, { height: `${h}%` }) as any }}>
+                          <div className="absolute bottom-0 left-0 right-0 bg-neon-gold animate-pulse activity-bar-fill" />
+                        </div>
+                      ))}
+                    </div>
+                    <div className="grid grid-cols-2 gap-4 mt-6">
+                      <div>
+                        <div className="text-[0.6rem] text-muted font-bold">Total Calls</div>
+                        <div className="text-lg font-heading text-white">{callLogs.length}</div>
+                      </div>
+                      <div>
+                        <div className="text-[0.6rem] text-muted font-bold">Success Rate</div>
+                        <div className="text-lg font-heading text-success">{stats.callSuccessRate}%</div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {!isMobile && (
+                  <div className="hud-card flex-1 flex flex-col overflow-hidden">
+                    <div className="flex items-center justify-between mb-4">
+                      <div className="hud-label flex items-center gap-2"><Activity size={14} /> LIVE FEED</div>
+                      <ChevronRight size={14} className="text-muted" />
+                    </div>
+                    <div className="space-y-4 overflow-y-auto pr-2 custom-scrollbar">
+                      {(callLogs.length > 0 ? callLogs.slice(0, 8).map(log => ({
+                        type: log.status === 'completed' ? 'connected' as const : 'disconnected' as const,
+                        target: log.studentName,
+                        duration: `${Math.floor(log.duration / 60)}m ${log.duration % 60}s`,
+                        timestamp: new Date(log.timestamp).toLocaleTimeString()
+                      })) : [
+                        { type: 'connected' as const, target: 'NODE_ALPHA', duration: 'ACTIVE', timestamp: '10:42:18' },
+                        { type: 'disconnected' as const, target: 'NODE_BETA', duration: 'STANDBY', timestamp: '10:41:05' }
+                      ]).map((feed, i) => (
+                        <div key={i} className="flex items-center justify-between py-2 border-b border-white/5 last:border-0">
+                          <div>
+                            <div className="text-xs font-bold text-white">{feed.target}</div>
+                            <div className="text-[0.6rem] text-muted">{feed.timestamp}</div>
+                          </div>
+                          <div className="text-right">
+                            <span className={`text-[0.6rem] font-bold ${feed.type === 'connected' ? 'text-success' : 'text-danger'}`}>{feed.type.toUpperCase()}</span>
+                            <div className="text-[0.6rem] text-muted">{feed.duration}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </aside>
+            </div>
+          ) : (
+            <motion.div initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} className={`tab-content ${isMobile ? 'drives-tab-content-mobile' : 'drives-tab-content-desktop'}`}>
               <>
                 {!isMobile ? (
                   <div className="flex justify-between items-center mb-8">
                     <div>
                       <div className="hud-kicker">STRATEGIC_OPERATIONS</div>
-                      <h2 className="hud-value-lg m-0" style={{ fontSize: '2.5rem', fontFamily: 'var(--font-heading)' }}>Active Campaigns</h2>
+                      <h2 className="hud-value-lg m-0 campaigns-h2">Active Drive</h2>
                     </div>
                     <div className="flex gap-4">
-                      <div className="search-box tactical" style={{ width: '320px' }}>
+                      <div className="search-box tactical campaigns-search-box">
                         <input
                           type="text"
-                          placeholder="SEARCH_CAMPAIGNS..."
+                          placeholder="SEARCH_Drive..."
                           className="search-input"
                           value={driveSearchTerm}
                           onChange={(e) => setDriveSearchTerm(e.target.value)}
@@ -1639,9 +1861,9 @@ function App() {
                     <div className="flex justify-between items-center mb-4">
                       <div>
                         <div className="hud-kicker">STRAT_OPS</div>
-                        <h2 className="mobile-page-title" style={{ fontSize: '2rem' }}>Campaigns</h2>
+                        <h2 className="mobile-page-title drive-mobile-h2">Drive</h2>
                       </div>
-                      <button className="hud-icon-btn active" onClick={openAddDriveModal}>
+                      <button className="hud-icon-btn active" title="Create new campaign" onClick={openAddDriveModal}>
                         <FolderPlus size={18} />
                       </button>
                     </div>
@@ -1668,16 +1890,24 @@ function App() {
                         whileTap={{ scale: 0.98 }}
                         key={drive.id}
                         className="drive-card"
-                        style={{ cursor: 'pointer' }}
-                        onClick={() => setViewingDrive(drive)}
+                        {...{ style: Object.assign({}, { cursor: 'pointer' }) as any }}
+                        onClick={() => {
+                          setViewingDrive(drive);
+                          const driveStudents = students.filter(s => drive.contactIds.includes(s.id));
+                          if (driveStudents.length > 0) {
+                            setActiveStudent(driveStudents[0]);
+                          } else {
+                            setActiveStudent(null);
+                          }
+                        }}
                       >
                         <div className="flex justify-between items-start">
                           <h3 className="m-0">{drive.name}</h3>
                           <div className="flex gap-2">
-                            <button className="btn-icon p-1" style={{ color: 'var(--accent-primary)' }} onClick={(e) => { e.stopPropagation(); openEditDriveModal(drive); }} title="Edit Campaign">
+                            <button className="btn-icon p-1 drive-edit-btn" onClick={(e) => { e.stopPropagation(); openEditDriveModal(drive); }} title="Edit Campaign">
                               <Edit3 size={16} />
                             </button>
-                            <button className="btn-icon p-1" style={{ color: 'var(--accent-danger)' }} onClick={(e) => { e.stopPropagation(); deleteDrive(drive.id); }} title="Delete Campaign">
+                            <button className="btn-icon p-1 drive-delete-btn" onClick={(e) => { e.stopPropagation(); deleteDrive(drive.id); }} title="Delete Campaign">
                               <Trash2 size={16} />
                             </button>
                           </div>
@@ -1694,8 +1924,8 @@ function App() {
                   </div>
                 )}
               </>
-            )}
-          </motion.div>
+            </motion.div>
+          )
         )}
 
         {currentTab === 'analytics' && (
@@ -1704,14 +1934,6 @@ function App() {
             animate={{ opacity: 1, scale: 1, y: 0 }}
             transition={{ type: 'spring', damping: 25, stiffness: 120 }}
             className="tab-content"
-            style={{
-              height: isMobile ? 'auto' : 'calc(100vh - 110px)',
-              overflow: 'hidden',
-              padding: isMobile ? '16px' : '24px',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '16px'
-            }}
           >
             {/* LUXURY TACTICAL HEADER */}
             <div className="flex justify-between items-end pb-3 border-b border-white/10 relative">
@@ -1719,352 +1941,380 @@ function App() {
               <div>
                 <div className="flex items-center gap-2 mb-1">
                   <Activity size={14} className="text-neon-gold animate-pulse" />
-                  <div className="hud-kicker" style={{ fontSize: '0.65rem', opacity: 0.8, letterSpacing: '2px' }}>INTEL_RECON_v6.0</div>
+                  <div className="hud-kicker" {...{ style: Object.assign({}, { fontSize: '0.65rem', opacity: 0.8, letterSpacing: '2px' }) as any }}>INTEL_RECON_v6.0</div>
                 </div>
-                <h2 className="hud-value-lg m-0 leading-none" style={{ fontSize: isMobile ? '1.5rem' : '2rem', color: '#fff', textShadow: '0 0 20px rgba(212,175,55,0.3)' }}>TACTICAL_ANALYTICS</h2>
+                <h2 className="hud-value-lg m-0 leading-none" {...{ style: Object.assign({}, { fontSize: isMobile ? '1.5rem' : '2rem', color: '#fff', textShadow: '0 0 20px rgba(212,175,55,0.3)' }) as any }}>TACTICAL_ANALYTICS</h2>
               </div>
               <div className="flex gap-6 items-center">
                 <div className="flex flex-col items-end hidden md:flex">
-                  <div className="hud-kicker" style={{ fontSize: '0.55rem', color: 'var(--text-muted)' }}>SYSTEM_TIME</div>
-                  <div className="hud-value-sm" style={{ fontSize: '0.8rem', color: 'var(--neon-gold)' }}>{new Date().toLocaleTimeString()}</div>
+                  <div className="hud-kicker" {...{ style: Object.assign({}, { fontSize: '0.55rem', color: 'var(--text-muted)' }) as any }}>SYSTEM_TIME</div>
+                  <div className="hud-value-sm" {...{ style: Object.assign({}, { fontSize: '0.8rem', color: 'var(--neon-gold)' }) as any }}>{new Date().toLocaleTimeString()}</div>
                 </div>
                 <div className="h-8 w-px bg-white/10 hidden md:block" />
                 <div className="flex flex-col items-end">
-                  <div className="hud-kicker" style={{ fontSize: '0.55rem', color: 'var(--text-muted)' }}>OPS_STATUS</div>
+                  <div className="hud-kicker" {...{ style: Object.assign({}, { fontSize: '0.55rem', color: 'var(--text-muted)' }) as any }}>OPS_STATUS</div>
                   <div className="flex items-center gap-1.5 px-2 py-0.5 bg-success-green/10 border border-success-green/30 rounded-sm">
-                    <div className="w-1.5 h-1.5 rounded-full bg-success-green animate-pulse" style={{ boxShadow: '0 0 8px var(--success-green)' }} />
-                    <span className="hud-value-sm text-success-green" style={{ fontSize: '0.7rem', letterSpacing: '1px' }}>NOMINAL</span>
+                    <div className="w-1.5 h-1.5 rounded-full bg-success-green animate-pulse" {...{ style: Object.assign({}, { boxShadow: '0 0 8px var(--success-green)' }) as any }} />
+                    <span className="hud-value-sm text-success-green" {...{ style: Object.assign({}, { fontSize: '0.7rem', letterSpacing: '1px' }) as any }}>NOMINAL</span>
                   </div>
                 </div>
               </div>
             </div>
 
-            {/* DYNAMIC GRID - PREMIUM ZERO SCROLL */}
-            <div className="flex-1 grid grid-cols-12 grid-rows-6 gap-4 min-h-0">
+            {/* DYNAMIC GRID - ULTRA PREMIUM HUD */}
+            <div className="flex-1 grid grid-cols-12 gap-5 min-h-0 relative">
+              {/* Animated HUD Background Grid */}
+              <div className="absolute inset-0 pointer-events-none opacity-[0.03]" {...{ style: Object.assign({}, { backgroundImage: 'linear-gradient(var(--neon-gold) 1px, transparent 1px), linear-gradient(90deg, var(--neon-gold) 1px, transparent 1px)', backgroundSize: '40px 40px' }) as any }} />
 
-              {/* TOP LEFT: CORE PIE CHART (LEAD STATUS) */}
-              <div className="col-span-12 lg:col-span-4 row-span-3 settings-card-tactical p-5 flex flex-col min-h-0 relative overflow-hidden group">
-                <div className="absolute top-0 right-0 w-32 h-32 bg-neon-gold/5 rounded-full blur-3xl -mr-10 -mt-10 transition-opacity group-hover:bg-neon-gold/10" />
-                <div className="hud-kicker mb-4" style={{ fontSize: '0.65rem', color: 'var(--neon-gold)' }}>DISTRIBUTION_STATUS</div>
-                <div className="flex-1 flex items-center justify-center relative min-h-0">
-                  <svg viewBox="0 0 40 40" className="w-full h-full max-h-[190px] drop-shadow-2xl">
+              {/* TOP LEFT: DISTRIBUTION RADAR (Donut) */}
+              <div className="col-span-12 lg:col-span-4 h-[32vh] lg:h-auto settings-card-tactical p-0 flex flex-col relative overflow-hidden group border border-white/10 bg-black/40 backdrop-blur-md rounded-lg shadow-[0_0_30px_rgba(0,0,0,0.8)]">
+                {/* Cyber Corner Brackets */}
+                <div className="absolute top-0 left-0 w-4 h-4 border-t-2 border-l-2 border-neon-gold/50" />
+                <div className="absolute top-0 right-0 w-4 h-4 border-t-2 border-r-2 border-neon-gold/50" />
+                <div className="absolute bottom-0 left-0 w-4 h-4 border-b-2 border-l-2 border-neon-gold/50" />
+                <div className="absolute bottom-0 right-0 w-4 h-4 border-b-2 border-r-2 border-neon-gold/50" />
+
+                <div className="p-4 border-b border-white/5 bg-gradient-to-r from-neon-gold/10 to-transparent flex justify-between items-center">
+                  <div className="hud-kicker text-neon-gold tracking-[3px] text-[0.65rem] font-bold">TARGET_DISTRIBUTION</div>
+                  <Activity size={14} className="text-neon-gold opacity-50" />
+                </div>
+
+                <div className="flex-1 flex items-center justify-center relative min-h-0 p-4">
+                  {/* Radar Sweep */}
+                  <motion.div
+                    animate={{ rotate: 360 }}
+                    transition={{ duration: 4, repeat: Infinity, ease: 'linear' }}
+                    className="absolute inset-0 m-auto w-36 h-36 rounded-full border border-neon-gold/20"
+                    {...{ style: Object.assign({}, { background: 'conic-gradient(from 0deg, transparent 70%, rgba(212,175,55,0.2) 100%)' }) as any }}
+                  />
+                  <svg viewBox="0 0 40 40" className="w-full h-full max-h-[180px] drop-shadow-[0_0_15px_rgba(212,175,55,0.4)] relative z-10">
                     {[
-                      { val: stats.new, color: 'rgba(212,175,55,0.15)', l: 'NEW' },
+                      { val: stats.new, color: 'rgba(212,175,55,0.2)', l: 'NEW' },
                       { val: stats.contacted, color: 'var(--gold-bright)', l: 'ACT' },
                       { val: stats.enrolled, color: 'var(--success-green)', l: 'ENR' },
                       { val: students.filter(s => s.status === 'not_interested').length, color: 'var(--danger-red)', l: 'NEG' }
-                    ].reduce((acc: any, item, idx) => {
+                    ].reduce((acc, item, idx) => {
                       const total = stats.total || 1;
                       const pct = (item.val / total) * 100;
                       const offset = acc.offset;
                       if (pct > 0) {
                         acc.elements.push(
                           <motion.circle
-                            key={idx} cx="20" cy="20" r="16" fill="none"
-                            stroke={item.color} strokeWidth="4.5"
+                            key={idx} cx="20" cy="20" r="15.5" fill="none"
+                            stroke={item.color} strokeWidth="3"
                             strokeDasharray={`${pct} ${100 - pct}`}
                             strokeDashoffset={-offset}
-                            strokeLinecap="round"
-                            initial={{ pathLength: 0, opacity: 0 }}
-                            animate={{ pathLength: 1, opacity: 1 }}
-                            transition={{ duration: 1.5, delay: idx * 0.15, ease: "easeOut" }}
-                            style={{ filter: `drop-shadow(0 0 4px ${item.color})` }}
+                            strokeLinecap="butt"
+                            initial={{ pathLength: 0, opacity: 0, rotate: -90 }}
+                            animate={{ pathLength: 1, opacity: 1, rotate: -90 }}
+                            transition={{ duration: 2, delay: idx * 0.2, ease: 'circOut' }}
+                            {...{ style: Object.assign({}, { transformOrigin: 'center' }) as any }}
                           />
                         );
                       }
                       acc.offset += pct;
                       return acc;
-                    }, { offset: 0, elements: [] }).elements}
-                    <circle cx="20" cy="20" r="12" fill="var(--bg-panel)" stroke="rgba(255,255,255,0.05)" strokeWidth="0.5" />
+                    }, { offset: 0, elements: [] as any[] }).elements}
+                    {/* Inner decorative rings */}
+                    <circle cx="20" cy="20" r="12" fill="var(--bg-panel)" stroke="rgba(212,175,55,0.15)" strokeWidth="0.5" strokeDasharray="1 1" />
+                    <circle cx="20" cy="20" r="10" fill="rgba(0,0,0,0.5)" />
                   </svg>
-                  <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+
+                  <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none z-20">
                     <motion.div
-                      initial={{ scale: 0.5, opacity: 0 }}
+                      initial={{ scale: 0, opacity: 0 }}
                       animate={{ scale: 1, opacity: 1 }}
-                      transition={{ delay: 0.5, duration: 0.5 }}
-                      className="hud-value-lg" style={{ fontSize: '1.8rem', textShadow: '0 0 15px var(--neon-gold)' }}
+                      transition={{ type: 'spring', stiffness: 200, damping: 10, delay: 0.8 }}
+                      className="text-white font-black text-2xl tracking-tighter" {...{ style: Object.assign({}, { textShadow: '0 0 20px var(--neon-gold)' }) as any }}
                     >
                       {stats.total}
                     </motion.div>
-                    <div className="hud-kicker" style={{ fontSize: '0.55rem', opacity: 0.7 }}>TOTAL_LEADS</div>
+                    <div className="text-[0.45rem] font-mono text-neon-gold/80 tracking-widest mt-1">LEAD_COUNT</div>
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-2 mt-4">
+
+                {/* Legend Grid */}
+                <div className="grid grid-cols-2 gap-[1px] bg-white/5 border-t border-white/5">
                   {[
                     { l: 'NEW_TARGETS', v: stats.new, c: 'rgba(212,175,55,0.4)' },
                     { l: 'ACTIVE_COMMS', v: stats.contacted, c: 'var(--gold-bright)' },
-                    { l: 'SECURED', v: stats.enrolled, c: 'var(--success-green)' },
-                    { l: 'REJECTED', v: students.filter(s => s.status === 'not_interested').length, c: 'var(--danger-red)' }
+                    { l: 'SECURED_OPS', v: stats.enrolled, c: 'var(--success-green)' },
+                    { l: 'REJECTED_LNK', v: students.filter(s => s.status === 'not_interested').length, c: 'var(--danger-red)' }
                   ].map((item, i) => (
-                    <div key={i} className="flex items-center justify-between p-1.5 bg-black/20 rounded border border-white/5 hover:border-white/10 transition-colors">
-                      <div className="flex items-center gap-2">
-                         <div className="w-1.5 h-1.5 rounded-full" style={{ background: item.c, boxShadow: `0 0 5px ${item.c}` }} />
-                         <span className="hud-kicker" style={{ fontSize: '0.5rem' }}>{item.l}</span>
+                    <motion.div
+                      key={i}
+                      whileHover={{ backgroundColor: 'rgba(255,255,255,0.05)' }}
+                      className="flex items-center justify-between p-2.5 bg-black/40 transition-colors relative overflow-hidden"
+                    >
+                      <motion.div
+                        className="absolute left-0 top-0 bottom-0 w-[2px]"
+                        {...{ style: Object.assign({}, { backgroundColor: item.c }) as any }}
+                        initial={{ height: 0 }}
+                        animate={{ height: '100%' }}
+                        transition={{ delay: 1 + i * 0.1 }}
+                      />
+                      <div className="flex items-center gap-2 pl-1">
+                        <div className="w-1 h-1 rounded-sm" {...{ style: Object.assign({}, { background: item.c, boxShadow: `0 0 8px ${item.c}` }) as any }} />
+                        <span className="text-[0.5rem] font-mono tracking-wider text-white/70">{item.l}</span>
                       </div>
-                      <span className="hud-value-sm" style={{ fontSize: '0.65rem' }}>{item.v}</span>
-                    </div>
+                      <span className="text-[0.75rem] font-bold text-white">{item.v}</span>
+                    </motion.div>
                   ))}
                 </div>
               </div>
 
-              {/* TOP CENTER: TACTICAL HISTOGRAM (ENGAGEMENT) */}
-              <div className="col-span-12 lg:col-span-5 row-span-3 settings-card-tactical p-5 flex flex-col min-h-0 relative">
-                <div className="flex justify-between items-center mb-4">
-                  <div className="hud-kicker" style={{ fontSize: '0.65rem', color: 'var(--neon-gold)' }}>ENGAGEMENT_VELOCITY</div>
-                  <div className="px-2 py-0.5 bg-neon-gold/10 border border-neon-gold/30 rounded-sm hud-value-sm text-neon-gold" style={{ fontSize: '0.55rem' }}>SIGNAL: OPTIMAL</div>
-                </div>
-                <div className="flex-1 flex items-end gap-1.5 px-2 min-h-0 relative">
-                  {/* Grid Lines */}
-                  <div className="absolute inset-0 flex flex-col justify-between pointer-events-none opacity-10 py-4">
-                    {[1,2,3,4].map(i => <div key={i} className="w-full h-px bg-neon-gold border-b border-dashed border-neon-gold" />)}
-                  </div>
-                  {Array.from({ length: 24 }).map((_, i) => {
-                    const h = 15 + Math.random() * 85;
-                    const isPeak = h > 80;
-                    return (
-                      <div key={i} className="flex-1 flex flex-col items-center h-full justify-end group">
-                        <motion.div
-                          className="w-full relative rounded-t-sm overflow-hidden"
-                          style={{ height: `${h}%`, minHeight: '4px', background: isPeak ? 'var(--gold-bright)' : 'rgba(212,175,55,0.2)' }}
-                          initial={{ scaleY: 0 }}
-                          animate={{ scaleY: 1 }}
-                          transition={{ delay: i * 0.03, type: 'spring' }}
-                          whileHover={{ scaleY: 1.05, filter: 'brightness(1.5)' }}
-                        >
-                           <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent" />
-                           {isPeak && <div className="absolute top-0 left-0 w-full h-2 bg-white/40 blur-[1px]" />}
-                        </motion.div>
-                        <div className="opacity-0 group-hover:opacity-100 transition-opacity text-[8px] font-mono text-neon-gold mt-1 absolute -top-4">{Math.round(h)}</div>
+              {/* CENTER & RIGHT COLUMN CONTAINER */}
+              <div className="col-span-12 lg:col-span-8 flex flex-col gap-5 min-h-0">
+
+                {/* TOP ROW: HISTOGRAM & METRICS CLUSTER */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-5 h-auto lg:h-[45%]">
+
+                  {/* HISTOGRAM: ENGAGEMENT VELOCITY */}
+                  <div className="settings-card-tactical p-4 flex flex-col relative overflow-hidden border border-white/10 bg-black/40 backdrop-blur-md rounded-lg group">
+                    <div className="absolute top-0 right-0 w-32 h-32 bg-neon-gold/5 blur-3xl rounded-full opacity-0 group-hover:opacity-100 transition-opacity duration-700" />
+
+                    <div className="flex justify-between items-center mb-4 border-b border-white/5 pb-2">
+                      <div className="flex items-center gap-2">
+                        <BarChart3 size={14} className="text-neon-gold" />
+                        <div className="hud-kicker text-neon-gold tracking-[2px] text-[0.6rem]">VELOCITY_MATRIX</div>
                       </div>
-                    );
-                  })}
-                </div>
-                <div className="flex justify-between mt-3 px-2 border-t border-white/10 pt-2">
-                  <span className="hud-kicker" style={{ fontSize: '0.5rem', color: 'var(--text-muted)' }}>00:00_HRS</span>
-                  <span className="hud-kicker" style={{ fontSize: '0.5rem', letterSpacing: '2px' }}>DEPLOYMENT_CYCLE</span>
-                  <span className="hud-kicker" style={{ fontSize: '0.5rem', color: 'var(--text-muted)' }}>23:59_HRS</span>
-                </div>
-              </div>
+                      <div className="px-2 py-0.5 bg-success-green/10 border border-success-green/30 rounded text-[0.5rem] font-mono text-success-green animate-pulse shadow-[0_0_10px_rgba(0,255,178,0.2)]">
+                        SYNC: STABLE
+                      </div>
+                    </div>
 
-              {/* TOP RIGHT: CONVERSION AREA CHART */}
-              <div className="col-span-12 lg:col-span-4 row-span-3 settings-card-tactical p-5 flex flex-col min-h-0 relative overflow-hidden">
-                <div className="hud-kicker mb-4" style={{ fontSize: '0.65rem', color: 'var(--neon-gold)' }}>CONVERSION_MATRIX</div>
-                <div className="flex-1 min-h-0 relative">
-                  <svg viewBox="0 0 100 40" className="w-full h-full drop-shadow-xl" preserveAspectRatio="none">
-                    <defs>
-                      <linearGradient id="areaGradient" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="var(--success-green)" stopOpacity="0.4" />
-                        <stop offset="100%" stopColor="var(--success-green)" stopOpacity="0.0" />
-                      </linearGradient>
-                      <filter id="glow">
-                        <feGaussianBlur stdDeviation="1.5" result="coloredBlur"/>
-                        <feMerge>
-                          <feMergeNode in="coloredBlur"/>
-                          <feMergeNode in="SourceGraphic"/>
-                        </feMerge>
-                      </filter>
-                    </defs>
-                    {/* Background Grid */}
-                    <path d="M 0 10 L 100 10 M 0 20 L 100 20 M 0 30 L 100 30" stroke="rgba(255,255,255,0.05)" strokeWidth="0.5" strokeDasharray="2 2" />
-                    
-                    <motion.path
-                      d="M0 35 Q 20 10 40 22 T 80 8 T 100 18 L 100 40 L 0 40 Z" 
-                      fill="url(#areaGradient)"
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      transition={{ duration: 1, delay: 0.5 }}
-                    />
-                    <motion.path
-                      d="M0 35 Q 20 10 40 22 T 80 8 T 100 18"
-                      fill="none" stroke="var(--success-green)" strokeWidth="1.5"
-                      filter="url(#glow)"
-                      initial={{ pathLength: 0 }} animate={{ pathLength: 1 }}
-                      transition={{ duration: 2, ease: "easeInOut" }}
-                    />
+                    <div className="flex-1 flex items-end gap-[2px] px-1 relative z-10">
+                      {/* Grid Lines */}
+                      <div className="absolute inset-0 flex flex-col justify-between pointer-events-none opacity-20 py-2">
+                        {[1, 2, 3, 4].map(i => <div key={i} className="w-full h-px border-b border-dashed border-neon-gold/30" />)}
+                      </div>
+
+                      {ENGAGEMENT_BAR_HEIGHTS.map((h, i) => {
+                        const isPeak = h > 75;
+                        return (
+                          <div key={i} className="flex-1 flex flex-col items-center h-full justify-end group/bar relative">
+                            {/* Hover Tooltip */}
+                            <div className="absolute -top-6 bg-black border border-neon-gold/50 text-neon-gold text-[0.5rem] px-1.5 py-0.5 rounded opacity-0 group-hover/bar:opacity-100 transition-opacity whitespace-nowrap z-20 pointer-events-none font-mono">
+                              VOL: {Math.round(h)}%
+                            </div>
+
+                            <motion.div
+                              className="w-full relative rounded-t-[1px] overflow-hidden"
+                              {...{ style: Object.assign({}, { height: `${h}%`, minHeight: '2px', background: isPeak ? 'var(--neon-gold)' : 'rgba(212,175,55,0.15)' }) as any }}
+                              initial={{ scaleY: 0 }}
+                              animate={{ scaleY: 1 }}
+                              transition={{ delay: i * 0.04, type: 'spring', damping: 12 }}
+                              whileHover={{ scaleY: 1.05, opacity: 1, filter: 'brightness(1.5)' }}
+                            >
+                              {/* Stacked block effect */}
+                              <div className="absolute inset-0 opacity-20" {...{ style: Object.assign({}, { backgroundImage: 'repeating-linear-gradient(0deg, transparent, transparent 2px, #000 2px, #000 3px)' }) as any }} />
+                              {isPeak && <div className="absolute top-0 left-0 w-full h-full bg-gradient-to-b from-white/40 to-transparent" />}
+                            </motion.div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div className="flex justify-between mt-2 pt-1 border-t border-white/5 opacity-50">
+                      <span className="font-mono text-[0.45rem] text-white tracking-widest">T-24H</span>
+                      <span className="font-mono text-[0.45rem] text-neon-gold tracking-widest">REALTIME</span>
+                    </div>
+                  </div>
+
+                  {/* METRICS CLUSTER: 4 CARDS */}
+                  <div className="grid grid-cols-2 gap-3">
                     {[
-                      {x: 0, y: 35}, {x: 20, y: 15}, {x: 40, y: 22}, {x: 60, y: 12}, {x: 80, y: 8}, {x: 100, y: 18}
-                    ].map((pt, i) => (
-                      <motion.circle 
-                        key={pt.x} cx={pt.x} cy={pt.y} r="1.5" fill="#fff" 
-                        initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ delay: 1 + i*0.2 }}
-                        style={{ filter: 'drop-shadow(0 0 3px var(--success-green))' }}
-                      />
-                    ))}
-                  </svg>
-                </div>
-                <div className="grid grid-cols-2 gap-3 mt-5">
-                  <div className="p-3 bg-gradient-to-br from-white/5 to-transparent rounded border border-white/10">
-                    <div className="hud-kicker" style={{ fontSize: '0.5rem', opacity: 0.7 }}>EFFICIENCY_RATE</div>
-                    <div className="hud-value-lg mt-1" style={{ fontSize: '1.2rem', color: 'var(--success-green)', textShadow: '0 0 10px rgba(0,255,178,0.3)' }}>{stats.conversionRate}%</div>
-                  </div>
-                  <div className="p-3 bg-gradient-to-br from-white/5 to-transparent rounded border border-white/10">
-                    <div className="hud-kicker" style={{ fontSize: '0.5rem', opacity: 0.7 }}>PEAK_RESONANCE</div>
-                    <div className="hud-value-lg mt-1" style={{ fontSize: '1.2rem', color: '#fff' }}>94.2<span style={{ fontSize: '0.6rem', color: 'var(--text-muted)' }}>Hz</span></div>
-                  </div>
-                </div>
-              </div>
+                      { l: 'TOTAL_RECORDS', v: stats.total, i: <Database size={16} />, c: 'var(--gold-bright)', b: 'rgba(255,217,90,0.15)' },
+                      { l: 'SUCCESS_OPS', v: stats.enrolled, i: <CheckCircle2 size={16} />, c: 'var(--success-green)', b: 'rgba(0,255,178,0.15)' },
+                      { l: 'AVG_INTEL_SEC', v: stats.avgCallTime + 's', i: <Clock size={16} />, c: '#fff', b: 'rgba(255,255,255,0.08)' },
+                      { l: 'PENDING_TARGETS', v: stats.new, i: <Activity size={16} />, c: 'var(--neon-gold)', b: 'rgba(212,175,55,0.15)' }
+                    ].map((m, i) => (
+                      <motion.div
+                        key={i}
+                        whileHover={{ y: -2, scale: 1.02 }}
+                        className="flex flex-col p-3.5 rounded-lg bg-black/60 border border-white/10 relative overflow-hidden group shadow-[0_4px_15px_rgba(0,0,0,0.5)] backdrop-blur-md"
+                      >
+                        {/* Animated Scanline Effect on hover */}
+                        <div className="absolute inset-0 bg-gradient-to-b from-transparent via-white/5 to-transparent -translate-y-full group-hover:translate-y-full transition-transform duration-1000 ease-in-out" />
 
-              {/* BOTTOM ROW: RECENT DEPLOYMENTS (LEFT) & TELEMETRY (RIGHT) */}
-              <div className="col-span-12 lg:col-span-8 row-span-3 flex flex-col gap-4 min-h-0">
-                <div className="settings-card-tactical flex-1 p-4 flex flex-col min-h-0 relative overflow-hidden">
-                   <div className="absolute top-0 left-0 w-[2px] h-full bg-gradient-to-b from-neon-gold/50 via-neon-gold/10 to-transparent" />
-                  <div className="flex justify-between items-center mb-3 pl-2">
-                    <div className="flex items-center gap-2">
-                      <div className="w-2 h-2 bg-neon-gold rounded-sm animate-pulse" />
-                      <div className="hud-kicker" style={{ fontSize: '0.65rem' }}>LIVE_DEPLOYMENT_LOGS</div>
+                        <div className="absolute -right-2 -top-2 p-3 opacity-10 group-hover:opacity-30 group-hover:rotate-12 transition-all duration-500" {...{ style: Object.assign({}, { color: m.c }) as any }}>
+                          {React.cloneElement(m.i, { size: 48 })}
+                        </div>
+
+                        {/* Tiny tactical corner dots */}
+                        <div className="absolute top-1.5 left-1.5 w-0.5 h-0.5 bg-white/30" />
+                        <div className="absolute bottom-1.5 right-1.5 w-0.5 h-0.5 bg-white/30" />
+
+                        <div className="flex flex-col h-full justify-between relative z-10">
+                          <span className="font-mono text-[0.45rem] tracking-[2px] opacity-70 text-white">{m.l}</span>
+                          <div className="mt-2 flex items-baseline gap-1">
+                            <motion.div
+                              initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.3 + i * 0.1 }}
+                              className="font-black text-2xl tracking-tighter" {...{ style: Object.assign({}, { color: m.c, textShadow: `0 0 20px ${m.b}` }) as any }}
+                            >
+                              {m.v}
+                            </motion.div>
+                          </div>
+                          <div className="mt-2.5 h-[2px] w-full bg-white/10 rounded-full overflow-hidden">
+                            <motion.div
+                              className="h-full relative shadow-[0_0_8px_currentColor]"
+                              {...{ style: Object.assign({}, { background: m.c, width: '100%' }) as any }}
+                              initial={{ x: '-100%' }}
+                              animate={{ x: '0%' }}
+                              transition={{ delay: 0.5 + i * 0.15, duration: 1, type: 'spring' }}
+                            >
+                              <div className="absolute top-0 right-0 w-8 h-full bg-white/60 blur-[1px]" />
+                            </motion.div>
+                          </div>
+                        </div>
+                      </motion.div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* BOTTOM ROW: TELEMETRY TABLE WITH HACKER EFFECT */}
+                <div className="flex-1 settings-card-tactical p-0 flex flex-col relative overflow-hidden border border-white/10 bg-black/50 backdrop-blur-md rounded-lg shadow-2xl">
+                  {/* Left edge accent */}
+                  <div className="absolute top-0 left-0 w-[3px] h-full bg-gradient-to-b from-neon-gold via-neon-gold/20 to-transparent" />
+
+                  <div className="p-3.5 border-b border-white/10 flex justify-between items-center bg-black/40">
+                    <div className="flex items-center gap-3">
+                      <div className="flex gap-1">
+                        <div className="w-1.5 h-1.5 bg-neon-gold rounded-full animate-ping" />
+                        <div className="w-1.5 h-1.5 bg-neon-gold rounded-full animate-pulse delay-75" />
+                        <div className="w-1.5 h-1.5 bg-neon-gold rounded-full animate-pulse delay-150" />
+                      </div>
+                      <div className="hud-kicker text-white tracking-[3px] text-[0.65rem]">LIVE_NETWORK_TELEMETRY</div>
                     </div>
-                    <div className="hud-kicker px-2 py-1 bg-black/40 rounded border border-white/10" style={{ fontSize: '0.5rem', color: 'var(--text-muted)' }}>
-                      NODE_ID: {Math.random().toString(36).substring(7).toUpperCase()}
+                    <div className="font-mono text-[0.55rem] tracking-widest text-neon-gold bg-neon-gold/10 px-2 py-1 rounded border border-neon-gold/20">
+                      NODE: {analyticsNodeId}
                     </div>
                   </div>
-                  <div className="flex-1 overflow-auto pr-2 custom-scrollbar">
+
+                  <div className="flex-1 overflow-auto custom-scrollbar relative">
                     <table className="w-full text-left border-collapse">
-                      <thead>
-                        <tr className="border-b border-white/10">
-                          <th className="hud-kicker pb-2 pl-2" style={{ fontSize: '0.5rem', color: 'var(--text-muted)' }}>TARGET_IDENTIFIER</th>
-                          <th className="hud-kicker pb-2" style={{ fontSize: '0.5rem', color: 'var(--text-muted)' }}>COMMS_STATUS</th>
-                          <th className="hud-kicker pb-2" style={{ fontSize: '0.5rem', color: 'var(--text-muted)' }}>DURATION</th>
-                          <th className="hud-kicker pb-2 text-right pr-2" style={{ fontSize: '0.5rem', color: 'var(--text-muted)' }}>TIMESTAMP</th>
+                      <thead className="sticky top-0 bg-black/90 backdrop-blur-md z-10">
+                        <tr>
+                          <th className="py-2.5 pl-4 font-mono text-[0.5rem] tracking-widest text-white/50 border-b border-white/10">TARGET_ID</th>
+                          <th className="py-2.5 font-mono text-[0.5rem] tracking-widest text-white/50 border-b border-white/10">CONNECTION_STATUS</th>
+                          <th className="py-2.5 font-mono text-[0.5rem] tracking-widest text-white/50 border-b border-white/10">SESS_DURATION</th>
+                          <th className="py-2.5 pr-4 text-right font-mono text-[0.5rem] tracking-widest text-white/50 border-b border-white/10">SYS_TIMESTAMP</th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-white/5">
-                        {callLogs.slice(0, 6).map((log, idx) => (
-                          <motion.tr 
-                            key={log.id} 
-                            initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: idx * 0.05 }}
-                            className="group hover:bg-white/5 transition-colors cursor-default"
+                      <tbody className="divide-y divide-white/5 font-mono">
+                        {callLogs.slice(0, 8).map((log, idx) => (
+                          <motion.tr
+                            key={log.id}
+                            initial={{ opacity: 0, backgroundColor: 'rgba(212,175,55,0.2)' }}
+                            animate={{ opacity: 1, backgroundColor: 'transparent' }}
+                            transition={{ delay: idx * 0.08, duration: 0.8 }}
+                            className="group hover:bg-white/5 transition-all cursor-default"
                           >
-                            <td className="py-2.5 pl-2">
-                              <div className="hud-value-sm truncate max-w-[150px] text-white group-hover:text-neon-gold transition-colors" style={{ fontSize: '0.7rem', letterSpacing: '0.5px' }}>{log.studentName.toUpperCase()}</div>
-                              <div className="text-[7px] font-mono text-muted mt-0.5">{log.phoneNumber}</div>
+                            <td className="py-3 pl-4">
+                              <div className="text-[0.7rem] font-bold text-white group-hover:text-neon-gold tracking-wider transition-colors drop-shadow-md">
+                                {log.studentName.toUpperCase()}
+                              </div>
+                              <div className="text-[0.45rem] text-white/40 mt-1">{log.phoneNumber}</div>
                             </td>
-                            <td className="py-2.5">
-                              <div className="flex items-center gap-1.5">
-                                <div className={`w-1.5 h-1.5 rounded-full ${log.status === 'completed' ? 'bg-success-green shadow-[0_0_5px_var(--success-green)]' : 'bg-danger-red shadow-[0_0_5px_var(--danger-red)]'}`} />
-                                <span className={`text-[6px] font-black tracking-widest ${log.status === 'completed' ? 'text-success-green' : 'text-danger-red'}`}>
-                                  {log.status === 'completed' ? 'LINK_ESTABLISHED' : 'LINK_FAILED'}
+                            <td className="py-3">
+                              <div className="flex items-center gap-2">
+                                <div className={`w-1.5 h-1.5 rounded-full ${log.status === 'completed' ? 'bg-success-green shadow-[0_0_8px_var(--success-green)]' : 'bg-danger-red shadow-[0_0_8px_var(--danger-red)] animate-pulse'}`} />
+                                <span className={`text-[0.5rem] font-bold tracking-widest ${log.status === 'completed' ? 'text-success-green' : 'text-danger-red'}`}>
+                                  {log.status === 'completed' ? 'LINK_SECURED' : 'LINK_DROPPED'}
                                 </span>
                               </div>
                             </td>
-                            <td className="py-2.5 hud-value-sm" style={{ fontSize: '0.65rem' }}>{formatTime(log.duration)}</td>
-                            <td className="py-2.5 text-[7px] font-mono text-muted text-right pr-2">{log.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</td>
+                            <td className="py-3">
+                              <div className="text-[0.65rem] text-white/80">{formatTime(log.duration)}</div>
+                            </td>
+                            <td className="py-3 pr-4 text-right">
+                              <div className="text-[0.55rem] text-neon-gold/60">
+                                {log.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                              </div>
+                            </td>
                           </motion.tr>
                         ))}
                       </tbody>
                     </table>
+
                     {callLogs.length === 0 && (
-                      <div className="h-full flex flex-col items-center justify-center opacity-30">
-                        <Activity size={24} className="mb-2" />
-                        <span className="hud-kicker" style={{ fontSize: '0.6rem' }}>AWAITING_TELEMETRY</span>
+                      <div className="absolute inset-0 flex flex-col items-center justify-center">
+                        <motion.div
+                          animate={{ rotate: 360 }} transition={{ duration: 8, repeat: Infinity, ease: 'linear' }}
+                          className="w-16 h-16 border-2 border-dashed border-white/10 rounded-full flex items-center justify-center mb-3"
+                        >
+                          <Activity size={20} className="text-white/20" />
+                        </motion.div>
+                        <span className="font-mono text-[0.6rem] tracking-[4px] text-white/30 animate-pulse">AWAITING_TELEMETRY</span>
                       </div>
                     )}
                   </div>
                 </div>
               </div>
-
-              {/* BOTTOM RIGHT: METRICS CLUSTER - LUXURY REDESIGN */}
-              <div className="col-span-12 lg:col-span-4 row-span-3 grid grid-cols-2 gap-3 min-h-0">
-                {[
-                  { l: 'TOTAL_RECORDS', v: stats.total, i: <Database size={14} />, c: 'var(--gold-bright)', b: 'rgba(255,217,90,0.1)' },
-                  { l: 'SUCCESS_OPS', v: stats.enrolled, i: <CheckCircle2 size={14} />, c: 'var(--success-green)', b: 'rgba(0,255,178,0.1)' },
-                  { l: 'AVG_INTEL', v: stats.avgCallTime + 's', i: <Clock size={14} />, c: '#fff', b: 'rgba(255,255,255,0.05)' },
-                  { l: 'PENDING_TARGETS', v: stats.new, i: <Activity size={14} />, c: 'var(--neon-gold)', b: 'rgba(212,175,55,0.1)' }
-                ].map((m, i) => (
-                  <motion.div 
-                    key={i} 
-                    whileHover={{ scale: 1.02, backgroundColor: 'rgba(255,255,255,0.05)' }}
-                    className="flex flex-col p-3 rounded bg-black/60 border border-white/10 relative overflow-hidden group shadow-lg backdrop-blur-md"
-                  >
-                    <div className="absolute top-0 right-0 p-2 opacity-20 group-hover:opacity-100 group-hover:scale-110 transition-all duration-300" style={{ color: m.c }}>{m.i}</div>
-                    
-                    {/* Tactical Corner Accents */}
-                    <div className="absolute top-0 left-0 w-2 h-2 border-t border-l border-white/30" />
-                    <div className="absolute bottom-0 right-0 w-2 h-2 border-b border-r border-white/30" />
-
-                    <div className="flex flex-col h-full justify-between relative z-10">
-                      <span className="hud-kicker" style={{ fontSize: '0.45rem', opacity: 0.6, letterSpacing: '1px' }}>{m.l}</span>
-                      <div className="mt-2">
-                        <div className="hud-value-lg leading-none" style={{ fontSize: '1.4rem', color: m.c, textShadow: `0 0 15px ${m.b}` }}>{m.v}</div>
-                      </div>
-                      <div className="mt-3 h-[3px] w-full bg-white/5 rounded-full overflow-hidden">
-                        <motion.div
-                          className="h-full relative"
-                          style={{ background: m.c, width: '75%' }}
-                          initial={{ width: 0 }}
-                          animate={{ width: '75%' }}
-                          transition={{ delay: 0.2 * i, duration: 1 }}
-                        >
-                          <div className="absolute top-0 right-0 w-4 h-full bg-white/50 blur-[2px]" />
-                        </motion.div>
-                      </div>
-                    </div>
-                  </motion.div>
-                ))}
-              </div>
             </div>
 
-            {/* REAL-TIME TELEMETRY TICKER - PREMIUM */}
-            <div className="h-8 flex gap-3 mt-2">
-              <div className="bg-neon-gold/10 px-4 flex items-center gap-3 rounded border border-neon-gold/30 shadow-[0_0_10px_rgba(212,175,55,0.1)] relative overflow-hidden">
-                <div className="absolute inset-0 bg-gradient-to-r from-neon-gold/20 to-transparent animate-pulse" />
-                <span className="hud-kicker relative z-10" style={{ fontSize: '0.55rem', color: 'var(--gold-bright)' }}>LIVE_SYS_STATUS</span>
-                <div className="flex gap-5 relative z-10">
+            {/* REAL-TIME TELEMETRY TICKER - CYBERPUNK EDITION */}
+            <div className="h-10 mt-4 flex gap-3 relative z-10">
+              <div className="bg-gradient-to-r from-neon-gold/20 to-neon-gold/5 px-5 flex items-center gap-4 rounded-lg border border-neon-gold/40 shadow-[0_0_20px_rgba(212,175,55,0.15)] relative overflow-hidden backdrop-blur-md hidden md:flex">
+                <div className="absolute top-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-white/50 to-transparent opacity-50" />
+                <span className="font-mono text-[0.55rem] font-bold tracking-[3px] text-neon-gold drop-shadow-[0_0_5px_var(--neon-gold)]">SYS_CORE</span>
+                <div className="w-[1px] h-4 bg-neon-gold/30" />
+                <div className="flex gap-6 relative z-10">
                   {[
-                    { k: 'CPU_LOAD', v: '18%' },
-                    { k: 'MEM_ALLOC', v: '1.2GB' },
-                    { k: 'UPLINK', v: 'SECURE' }
+                    { k: 'CPU', v: '18%' },
+                    { k: 'MEM', v: '1.2G' },
+                    { k: 'NET', v: 'OK' }
                   ].map(x => (
-                    <div key={x.k} className="flex gap-1.5 text-[8px] font-black tracking-widest">
-                      <span className="text-neon-gold/70">{x.k}:</span>
-                      <span className="text-white drop-shadow-[0_0_2px_#fff]">{x.v}</span>
+                    <div key={x.k} className="flex gap-1.5 font-mono text-[0.5rem] tracking-widest">
+                      <span className="text-neon-gold/50">{x.k}:</span>
+                      <span className="text-white font-bold">{x.v}</span>
                     </div>
                   ))}
                 </div>
               </div>
-              <div className="flex-1 bg-black/40 border border-white/10 rounded overflow-hidden relative backdrop-blur-sm">
-                 <div className="absolute left-0 top-0 bottom-0 w-8 bg-gradient-to-r from-black/80 to-transparent z-10" />
-                 <div className="absolute right-0 top-0 bottom-0 w-8 bg-gradient-to-l from-black/80 to-transparent z-10" />
+
+              <div className="flex-1 bg-black/60 border border-white/10 rounded-lg overflow-hidden relative backdrop-blur-md flex items-center">
+                {/* Gradient Fades for Marquee */}
+                <div className="absolute left-0 top-0 bottom-0 w-12 bg-gradient-to-r from-black via-black/80 to-transparent z-10" />
+                <div className="absolute right-0 top-0 bottom-0 w-12 bg-gradient-to-l from-black via-black/80 to-transparent z-10" />
+
                 <motion.div
-                  className="absolute inset-0 flex items-center whitespace-nowrap"
-                  animate={{ x: [0, -1000] }}
-                  transition={{ duration: 30, repeat: Infinity, ease: 'linear' }}
+                  className="absolute inset-0 flex items-center whitespace-nowrap px-4"
+                  animate={{ x: [0, -1500] }}
+                  transition={{ duration: 25, repeat: Infinity, ease: 'linear' }}
                 >
-                  <span className="hud-kicker font-mono" style={{ fontSize: '0.55rem', color: 'var(--text-muted)', letterSpacing: '3px' }}>
-                    [SYS_INIT] KERNEL BOOT SEQUENCE COMPLETE // [NET_SEC] ENCRYPTED TUNNEL ESTABLISHED ON PORT 443 // [DB_SYNC] 100% REPLICATION VERIFIED // [AI_CORE] PREDICTIVE RECRUITMENT MODELS ONLINE // [USER_AUTH] OPERATIVE ID: {loginEmail || 'AGENT_001'} AUTHORIZED // [SYS_WARN] NO ANOMALIES DETECTED // 
-                    [SYS_INIT] KERNEL BOOT SEQUENCE COMPLETE // [NET_SEC] ENCRYPTED TUNNEL ESTABLISHED ON PORT 443 // [DB_SYNC] 100% REPLICATION VERIFIED // [AI_CORE] PREDICTIVE RECRUITMENT MODELS ONLINE // [USER_AUTH] OPERATIVE ID: {loginEmail || 'AGENT_001'} AUTHORIZED // [SYS_WARN] NO ANOMALIES DETECTED //
+                  <span className="font-mono text-[0.55rem] text-neon-gold/70 tracking-[4px]">
+                    [SYS_INIT] KERNEL BOOT SEQUENCE COMPLETE &nbsp;//&nbsp; [NET_SEC] ENCRYPTED TUNNEL ESTABLISHED ON PORT 443 &nbsp;//&nbsp; [DB_SYNC] 100% REPLICATION VERIFIED &nbsp;//&nbsp; [AI_CORE] PREDICTIVE RECRUITMENT MODELS ONLINE &nbsp;//&nbsp; [USER_AUTH] OPERATIVE ID: {loginEmail || 'AGENT_001'} AUTHORIZED &nbsp;//&nbsp; [SYS_WARN] NO ANOMALIES DETECTED &nbsp;//&nbsp;
+                    [SYS_INIT] KERNEL BOOT SEQUENCE COMPLETE &nbsp;//&nbsp; [NET_SEC] ENCRYPTED TUNNEL ESTABLISHED ON PORT 443 &nbsp;//&nbsp; [DB_SYNC] 100% REPLICATION VERIFIED &nbsp;//&nbsp; [AI_CORE] PREDICTIVE RECRUITMENT MODELS ONLINE &nbsp;//&nbsp; [USER_AUTH] OPERATIVE ID: {loginEmail || 'AGENT_001'} AUTHORIZED &nbsp;//&nbsp; [SYS_WARN] NO ANOMALIES DETECTED &nbsp;//&nbsp;
                   </span>
                 </motion.div>
               </div>
             </div>
-          </motion.div>
-        )}
+          </motion.div>)}
 
         {currentTab === 'logs' && (
           <motion.div
             initial={{ opacity: 0, y: 10, scale: 0.99 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
-            className="tab-content"
-            style={{ padding: isMobile ? '1rem' : '2rem' }}
+            className={`tab-content ${isMobile ? 'logs-tab-padding-mobile' : 'logs-tab-padding-desktop'}`}
           >
             {/* HEADER AREA */}
             <div className="mb-8 flex justify-between items-end border-b border-white/5 pb-6">
               <div>
-                <div className="hud-kicker" style={{ color: 'var(--neon-gold)', marginBottom: '4px' }}>TELEMETRY_LOGS_v4.0</div>
-                <h2 className="hud-value-lg m-0" style={{ fontSize: isMobile ? '2rem' : '2.8rem', fontFamily: 'var(--font-heading)' }}>Recent Activity</h2>
-                <div className="text-muted mt-2 font-mono" style={{ fontSize: '0.7rem', letterSpacing: '1px' }}>
+                <div className="hud-kicker" >TELEMETRY_LOGS_v4.0</div>
+                <h2 className={`hud-value-lg m-0 ${isMobile ? 'logs-h2-mobile' : 'logs-h2-desktop'}`}>Recent Activity</h2>
+                <div className="text-muted mt-2 font-mono logs-meta">
                   Total Sessions: {callLogs.length} | Latency: 42ms | Status: <span className="text-success-green">ENCRYPTED</span>
                 </div>
               </div>
               {!isMobile && (
                 <div className="flex gap-3">
                   <button
-                    className="btn btn-secondary"
-                    onClick={() => { if (confirm('Wipe all session telemetry?')) setCallLogs([]); }}
-                    style={{ fontSize: '0.65rem', height: '36px' }}
+                    className="btn btn-secondary logs-wipe-btn"
+                    onClick={wipeAllCallLogs}
                   >
                     <Trash2 size={14} /> WIPE_LOGS
                   </button>
-                  <button className="btn btn-primary btn-glow" style={{ fontSize: '0.65rem', height: '36px' }}>
+                  <button className="btn btn-primary btn-glow logs-export-btn" onClick={exportCallLogsIntel}>
                     <Download size={14} /> EXPORT_INTEL
                   </button>
                 </div>
@@ -2074,7 +2324,7 @@ function App() {
             {callLogs.length === 0 ? (
               <div className="flex flex-col items-center justify-center p-20 bg-black/40 rounded-lg border border-dashed border-white/10">
                 <Activity size={48} className="text-muted mb-4 opacity-20" />
-                <p className="hud-kicker" style={{ fontSize: '0.8rem', opacity: 0.5 }}>NO_ACTIVE_TELEMETRY_FOUND</p>
+                <p className="hud-kicker logs-empty-kicker">NO_ACTIVE_TELEMETRY_FOUND</p>
                 <p className="text-xs text-muted mt-2">Logs will populate once tactical engagement begins.</p>
               </div>
             ) : isMobile ? (
@@ -2085,8 +2335,7 @@ function App() {
                     initial={{ opacity: 0, x: -10 }}
                     animate={{ opacity: 1, x: 0 }}
                     key={log.id}
-                    className="settings-card-tactical"
-                    style={{ padding: '1rem', border: '1px solid rgba(255, 255, 255, 0.05)' }}
+                    className="settings-card-tactical mobile-log-card"
                   >
                     <div className="flex justify-between items-start">
                       <div className="flex gap-3">
@@ -2099,24 +2348,26 @@ function App() {
                         </div>
                       </div>
                       <div className="text-right">
-                        <div className="text-[10px] font-bold text-neon-gold">{log.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+                        <div className="text-[10px] font-bold text-neon-gold">{log.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) as any}</div>
                         <div className={`text-[9px] font-black mt-1 ${log.status === 'completed' ? 'text-success-green' : 'text-danger-red'}`}>
                           {log.status.toUpperCase()}
                         </div>
                       </div>
                     </div>
                     <div className="mt-4 pt-3 border-t border-white/5 flex justify-between items-center">
-                      <div className="hud-value-sm" style={{ fontSize: '0.7rem' }}>DURATION: {formatTime(log.duration)}</div>
+                      <div className="hud-value-sm mobile-log-duration">DURATION: {formatTime(log.duration)}</div>
                       <div className="flex gap-2">
                         <button
                           className="hud-icon-btn small"
                           onClick={() => window.open(`tel:${log.phoneNumber.replace(/\D/g, '')}`, '_self')}
+                          title="Call this number"
                         >
                           <Phone size={12} />
                         </button>
                         <button
                           className="hud-icon-btn small danger"
-                          onClick={() => setCallLogs(callLogs.filter(l => l.id !== log.id))}
+                          title="Delete log entry"
+                          onClick={() => deleteCallLogById(log.id)}
                         >
                           <Trash2 size={12} />
                         </button>
@@ -2131,23 +2382,23 @@ function App() {
                 <table className="w-full text-left border-collapse">
                   <thead>
                     <tr className="bg-white/2 border-b border-white/10">
-                      <th className="hud-kicker p-6" style={{ fontSize: '0.65rem' }}>TIME_STAMP</th>
-                      <th className="hud-kicker p-6" style={{ fontSize: '0.65rem' }}>OPERATIONAL_TARGET</th>
-                      <th className="hud-kicker p-6" style={{ fontSize: '0.65rem' }}>COMM_IDENTIFIER</th>
-                      <th className="hud-kicker p-6" style={{ fontSize: '0.65rem' }}>SESSION_LENGTH</th>
-                      <th className="hud-kicker p-6" style={{ fontSize: '0.65rem' }}>LINK_STATUS</th>
-                      <th className="hud-kicker p-6" style={{ fontSize: '0.65rem' }}>ENGAGEMENT_CONTROLS</th>
+                      <th className="hud-kicker p-6" {...{ style: Object.assign({}, { fontSize: '0.65rem' }) as any }}>TIME_STAMP</th>
+                      <th className="hud-kicker p-6" {...{ style: Object.assign({}, { fontSize: '0.65rem' }) as any }}>OPERATIONAL_TARGET</th>
+                      <th className="hud-kicker p-6" {...{ style: Object.assign({}, { fontSize: '0.65rem' }) as any }}>COMM_IDENTIFIER</th>
+                      <th className="hud-kicker p-6" {...{ style: Object.assign({}, { fontSize: '0.65rem' }) as any }}>SESSION_LENGTH</th>
+                      <th className="hud-kicker p-6" {...{ style: Object.assign({}, { fontSize: '0.65rem' }) as any }}>LINK_STATUS</th>
+                      <th className="hud-kicker p-6" {...{ style: Object.assign({}, { fontSize: '0.65rem' }) as any }}>ENGAGEMENT_CONTROLS</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/5">
                     {callLogs.map(log => (
                       <tr key={log.id} className="group hover:bg-white/2 transition-colors">
                         <td className="p-6">
-                          <div className="hud-value-sm" style={{ fontSize: '0.85rem' }}>{log.timestamp.toLocaleTimeString()}</div>
+                          <div className="hud-value-sm" {...{ style: Object.assign({}, { fontSize: '0.85rem' }) as any }}>{log.timestamp.toLocaleTimeString()}</div>
                           <div className="text-[9px] text-muted font-mono mt-1">{log.timestamp.toLocaleDateString()}</div>
                         </td>
                         <td className="p-6">
-                          <div className="hud-value-sm text-neon-gold" style={{ fontSize: '0.9rem', letterSpacing: '0.5px' }}>{log.studentName.toUpperCase()}</div>
+                          <div className="hud-value-sm text-neon-gold" {...{ style: Object.assign({}, { fontSize: '0.9rem', letterSpacing: '0.5px' }) as any }}>{log.studentName.toUpperCase()}</div>
                           <div className="flex items-center gap-1 mt-1">
                             <div className="w-1 h-1 rounded-full bg-success-green/40" />
                             <span className="text-[9px] text-muted font-bold">RECRUIT_QUALIFIED</span>
@@ -2157,14 +2408,14 @@ function App() {
                           <div className="text-sm font-mono text-white/80">{log.phoneNumber}</div>
                         </td>
                         <td className="p-6">
-                          <div className="hud-value-sm" style={{ fontSize: '0.85rem', color: log.duration > 0 ? '#fff' : 'var(--text-muted)' }}>
+                          <div className="hud-value-sm" {...{ style: Object.assign({}, { fontSize: '0.85rem', color: log.duration > 0 ? '#fff' : 'var(--text-muted)' }) as any }}>
                             {log.duration > 0 ? formatTime(log.duration) : '00:00:00'}
                           </div>
                         </td>
                         <td className="p-6">
                           <div className="flex items-center gap-2">
                             <div className={`w-1.5 h-1.5 rounded-full ${log.status === 'completed' ? 'bg-success-green animate-pulse' : 'bg-danger-red'}`} />
-                            <span className={`badge ${log.status === 'completed' ? 'badge-contacted' : 'badge-rejected'}`} style={{ fontSize: '0.6rem', letterSpacing: '1px' }}>
+                            <span className={`badge table-log-badge ${log.status === 'completed' ? 'badge-contacted' : 'badge-rejected'}`}>
                               {log.status.toUpperCase()}
                             </span>
                           </div>
@@ -2174,8 +2425,14 @@ function App() {
                             <button
                               className="hud-icon-btn"
                               onClick={() => {
-                                showToast(`Initiating redial: ${log.studentName}`, 'info');
+                                const student = students.find(s => s.name === log.studentName);
+                                if (student) {
+                                  setActiveStudent(student);
+                                  navigateTo('contacts');
+                                  if (isMobile) setMobileViewMode('detail');
+                                }
                                 window.open(`tel:${log.phoneNumber.replace(/\D/g, '')}`, '_self');
+                                showToast(`Redialing ${log.studentName}`, 'info');
                               }}
                               title="Redial"
                             >
@@ -2183,7 +2440,7 @@ function App() {
                             </button>
                             <button
                               className="hud-icon-btn danger"
-                              onClick={() => setCallLogs(callLogs.filter(l => l.id !== log.id))}
+                              onClick={() => deleteCallLogById(log.id)}
                               title="Archive Log"
                             >
                               <Trash2 size={16} />
@@ -2194,19 +2451,18 @@ function App() {
                     ))}
                   </tbody>
                 </table>
-              </div>
-            )}
+              </div>)}
           </motion.div>
         )}
 
         {/* Settings Tab */}
         {currentTab === 'settings' && (
-          <motion.div initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} className="tab-content" style={{ padding: isMobile ? '16px' : '32px' }}>
+          <motion.div initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} className={`tab-content ${isMobile ? 'settings-tab-padding-mobile' : 'settings-tab-padding-desktop'}`}>
             <div className="settings-section-tactical">
               {/* PAGE HEADER */}
-              <div className="settings-section-header-tactical" style={{ marginBottom: '3rem' }}>
+              <div className="settings-section-header-tactical settings-page-header">
                 <div className="hud-kicker">SYSTEM_CONFIGURATION</div>
-                <h2 className="hud-value-lg m-0" style={{ fontSize: isMobile ? '2rem' : '2.8rem', fontFamily: 'var(--font-heading)' }}>Settings</h2>
+                <h2 className={`hud-value-lg m-0 ${isMobile ? 'settings-h2-mobile' : 'settings-h2-desktop'}`}>Settings</h2>
               </div>
 
               {/* AUTOMATION SECTION */}
@@ -2222,8 +2478,9 @@ function App() {
                       <div className="settings-hint-tactical">Wait interval between completed call and next initiation.</div>
                     </div>
                     <select
+                      title="Select auto-dial delay"
                       className="settings-input-tactical"
-                      style={{ width: '140px' }}
+                      {...{ style: Object.assign({}, { width: '140px' }) as any }}
                       value={appSettings.autoDialDelay}
                       onChange={(e) => {
                         setAppSettings({ ...appSettings, autoDialDelay: parseInt(e.target.value) });
@@ -2268,7 +2525,7 @@ function App() {
                       className="settings-input-tactical"
                       placeholder="ENTER_ID..."
                       value={appSettings.callerId}
-                      onChange={(e) => setAppSettings({ ...appSettings, callerId: e.target.value })}
+                      onChange={(e) => setAppSettings({ ...appSettings, callerId: e.target.value }) as any}
                       onBlur={() => showToast('ID Synchronized')}
                     />
                   </div>
@@ -2279,13 +2536,13 @@ function App() {
                     </div>
                     <textarea
                       className="settings-input-tactical"
-                      style={{ minHeight: '100px', resize: 'vertical' }}
+                      {...{ style: Object.assign({}, { minHeight: '100px', resize: 'vertical' }) as any }}
                       placeholder="CONFIGURE_TEMPLATE..."
                       value={appSettings.smsTemplate}
-                      onChange={(e) => setAppSettings({ ...appSettings, smsTemplate: e.target.value })}
+                      onChange={(e) => setAppSettings({ ...appSettings, smsTemplate: e.target.value }) as any}
                       onBlur={() => showToast('Template Cached')}
                     />
-                    <div className="settings-hint-tactical" style={{ color: 'var(--neon-gold)', opacity: 0.7, fontSize: '0.65rem' }}>
+                    <div className="settings-hint-tactical settings-hint-gold">
                       VARIABLES: [Name], [Course], [CallerId]
                     </div>
                   </div>
@@ -2301,24 +2558,63 @@ function App() {
                 <div className="settings-card-tactical">
                   <div className="theme-grid-tactical">
                     {[
-                      { id: 'dark', name: 'NEON_DARK', icon: '🌑', color: '#050505' },
-                      { id: 'gold', name: 'SOLAR_GOLD', icon: '☀️', color: '#101014' },
-                      { id: 'silver', name: 'LUNAR_SILV', icon: '🌙', color: '#f0f0f0' },
-                      { id: 'system', name: 'AUTO_SYNC', icon: '🔄', color: 'linear-gradient(90deg, #333, #eee)' }
+                      {
+                        id: 'dark', name: 'NEON_EMERALD', icon: '🟢',
+                        bg: '#040706',
+                        sidebar: '#050807',
+                        accent: '#57FF8A',
+                        accentSoft: 'rgba(87,255,138,0.18)',
+                        label: 'Cyberpunk Green',
+                      },
+                      {
+                        id: 'gold', name: 'SOLAR_GOLD', icon: '☀️',
+                        bg: '#050505',
+                        sidebar: '#060606',
+                        accent: '#FFC400',
+                        accentSoft: 'rgba(255,196,0,0.18)',
+                        label: 'Luxury Neon Gold',
+                      },
+                      {
+                        id: 'silver', name: 'LUNAR_SILV', icon: '🌙',
+                        bg: 'linear-gradient(145deg, #F4F7FC 0%, #E9EFF8 50%, #DCE6F2 100%)',
+                        sidebar: 'rgba(255,255,255,0.55)',
+                        accent: '#8FA8C8',
+                        accentSoft: 'rgba(143,168,200,0.28)',
+                        label: 'Glassmorphism Light',
+                      },
+                      {
+                        id: 'system', name: 'AUTO_SYNC', icon: '🔄',
+                        bg: 'linear-gradient(135deg,#040706 0%,#050505 100%)',
+                        sidebar: 'rgba(255,255,255,0.05)',
+                        accent: '#57FF8A',
+                        accentSoft: 'rgba(87,255,138,0.10)',
+                        label: 'Time-based Smart',
+                      },
                     ].map(t => (
                       <div
                         key={t.id}
                         className={`theme-card-tactical ${appSettings.theme === t.id ? 'active' : ''}`}
-                        onClick={() => { setAppSettings({ ...appSettings, theme: t.id as any }); showToast(`${t.name} DEPLOYED`); }}
+                        onClick={() => { setAppSettings({ ...appSettings, theme: t.id as AppSettings['theme'] }); showToast(`${t.name} DEPLOYED`); }}
+                        {...{ style: appSettings.theme === t.id ? { borderColor: t.accent, boxShadow: `0 0 20px ${t.accentSoft}` } : {} }}
                       >
-                        <div className="theme-preview-tactical" style={{ background: t.color }}>
-                          <div style={{ width: '20%', background: 'rgba(212,175,55,0.2)', borderRight: '1px solid rgba(212,175,55,0.1)' }} />
-                          <div className="flex-1 p-2 flex flex-col gap-1 justify-center">
-                            <div style={{ height: '4px', width: '60%', background: 'var(--neon-gold)', borderRadius: '2px' }} />
-                            <div style={{ height: '3px', width: '80%', background: 'rgba(212,175,55,0.2)', borderRadius: '2px' }} />
+                        {/* Mini HUD preview */}
+                        <div className="theme-preview-tactical" {...{ style: Object.assign({}, { background: t.bg, border: `1px solid ${t.accentSoft}` }) as any }}>
+                          {/* Fake sidebar */}
+                          <div {...{ style: Object.assign({}, { width: '18%', background: t.sidebar, borderRight: `1px solid ${t.accentSoft}`, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, paddingTop: 4 }) as any }}>
+                            {[1, 2, 3].map(i => <div key={i} {...{ style: Object.assign({}, { width: '55%', height: 5, borderRadius: 2, background: i === 1 ? t.accent : t.accentSoft }) as any }} />)}
+                          </div>
+                          {/* Fake content */}
+                          <div {...{ style: Object.assign({}, { flex: 1, padding: '4px 6px', display: 'flex', flexDirection: 'column', gap: 3 }) as any }}>
+                            <div {...{ style: Object.assign({}, { height: 5, width: '70%', background: t.accent, borderRadius: 2, opacity: 0.9 }) as any }} />
+                            <div {...{ style: Object.assign({}, { height: 3, width: '90%', background: t.accentSoft, borderRadius: 2 }) as any }} />
+                            <div {...{ style: Object.assign({}, { height: 3, width: '55%', background: t.accentSoft, borderRadius: 2 }) as any }} />
+                            <div {...{ style: Object.assign({}, { marginTop: 3, height: 12, width: '40%', borderRadius: 4, background: t.accent, opacity: 0.8 }) as any }} />
                           </div>
                         </div>
-                        <div className="theme-name-tactical">{t.icon} {t.name}</div>
+                        <div className="theme-name-tactical" {...{ style: Object.assign({}, { color: appSettings.theme === t.id ? t.accent : undefined }) as any }}>
+                          {t.icon} {t.name}
+                          <div {...{ style: Object.assign({}, { fontSize: '0.62rem', opacity: 0.6, fontFamily: 'Inter, sans-serif', textTransform: 'none', fontWeight: 400, marginTop: 2 }) as any }}>{t.label}</div>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -2337,16 +2633,7 @@ function App() {
                       <div className="settings-label-tactical">Intelligence Export (JSON)</div>
                       <div className="settings-hint-tactical">Download encrypted full-state backup of all tactical data.</div>
                     </div>
-                    <button className="btn btn-primary btn-glow" style={{ padding: '8px 16px', fontSize: '0.7rem' }} onClick={() => {
-                      const data = { students, drives, callLogs, settings: appSettings, exportDate: new Date().toISOString() };
-                      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-                      const url = URL.createObjectURL(blob);
-                      const link = document.createElement('a');
-                      link.href = url;
-                      link.download = `GFLB_INTEL_${new Date().toISOString().split('T')[0]}.json`;
-                      link.click();
-                      showToast('Intel Exported');
-                    }}><Download size={14} /> EXPORT</button>
+                    <button className="btn btn-primary btn-glow settings-export-btn" onClick={exportIntel}><Download size={14} /> EXPORT</button>
                   </div>
 
                   <div className="settings-row-tactical">
@@ -2355,7 +2642,7 @@ function App() {
                       <div className="settings-hint-tactical">Ingest external contact lists via CSV or Excel blueprint.</div>
                     </div>
                     <div className="flex gap-2">
-                      <button className="btn btn-secondary" style={{ padding: '8px 12px', fontSize: '0.65rem' }} onClick={() => {
+                      <button className="btn btn-secondary settings-blueprint-btn" onClick={() => {
                         const csvContent = "Name,Phone No,Course / Degree,Gender,Date of Birth,Guardian Phone\nSanthosh Kumar,9876543210,B.Tech CS,Male,2005-05-20,9123456789";
                         const blob = new Blob([csvContent], { type: 'text/csv' });
                         const url = URL.createObjectURL(blob);
@@ -2364,12 +2651,12 @@ function App() {
                         link.download = "GFLB_TEMPLATE.csv";
                         link.click();
                       }}>BLUEPRINT</button>
-                      <label className="btn btn-primary btn-glow" style={{ cursor: 'pointer', padding: '8px 12px', fontSize: '0.65rem' }}>
+                      <label className="btn btn-primary btn-glow" {...{ style: Object.assign({}, { cursor: 'pointer', padding: '8px 12px', fontSize: '0.65rem' }) as any }}>
                         <Upload size={14} /> UPLOAD
                         <input
                           type="file"
                           accept=".csv, .xlsx, .xls"
-                          style={{ display: 'none' }}
+                          {...{ style: Object.assign({}, { display: 'none' }) as any }}
                           onChange={(e) => {
                             const file = e.target.files?.[0];
                             if (file) processFile(file);
@@ -2381,10 +2668,31 @@ function App() {
 
                   <div className="settings-row-tactical">
                     <div className="settings-info-tactical">
+                      <div className="settings-label-tactical">Restore Backup (JSON)</div>
+                      <div className="settings-hint-tactical">Import a previously exported GFLB_INTEL backup file.</div>
+                    </div>
+                    <label className="btn btn-secondary" {...{ style: Object.assign({}, { cursor: 'pointer', padding: '8px 12px', fontSize: '0.65rem' }) as any }}>
+                      <Database size={14} /> RESTORE
+                      <input
+                        type="file"
+                        accept=".json,application/json"
+                        {...{ style: Object.assign({}, { display: 'none' }) as any }}
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) importIntelBackup(file);
+                          e.target.value = '';
+                        }}
+                      />
+                    </label>
+                  </div>
+
+                  <div className="settings-row-tactical">
+                    <div className="settings-info-tactical">
                       <div className="settings-label-tactical">Cloud Intelligence Sync</div>
                       <div className="settings-hint-tactical">{isCloudEnabled ? 'REALTIME_SYNC_ACTIVE' : 'ACTIVATE_CLOUD_REPLICATION'}</div>
                     </div>
                     <button
+                      title={isCloudEnabled ? 'Disable cloud sync' : 'Enable cloud sync'}
                       className={`hud-icon-btn ${isCloudEnabled ? 'active' : ''}`}
                       onClick={() => {
                         const newState = !isCloudEnabled;
@@ -2400,20 +2708,20 @@ function App() {
               </section>
 
               {/* SECURITY */}
-              <section style={{ marginBottom: '100px' }}>
+              <section {...{ style: Object.assign({}, { marginBottom: '100px' }) as any }}>
                 <div className="settings-section-header-tactical">
                   <h3 className="settings-section-title-tactical">Security Protocols</h3>
                   <p className="settings-section-desc-tactical">Access control and session termination.</p>
                 </div>
-                <div className="settings-card-tactical" style={{ border: '1px solid var(--danger-red)', background: 'rgba(255, 77, 90, 0.02)' }}>
+                <div className="settings-card-tactical settings-danger-card">
                   <div className="settings-row-tactical">
                     <div className="settings-info-tactical">
-                      <div className="settings-label-tactical" style={{ color: 'var(--danger-red)' }}>Terminate Session</div>
+                      <div className="settings-label-tactical settings-danger-label">Terminate Session</div>
                       <div className="settings-hint-tactical">Currently authenticated as {loginEmail || 'TACTICAL_OPERATIVE'}.</div>
                     </div>
                     <button
                       className="btn btn-secondary"
-                      style={{ color: 'var(--danger-red)', borderColor: 'var(--danger-red)', padding: '10px 20px' }}
+                      {...{ style: Object.assign({}, { color: 'var(--danger-red)', borderColor: 'var(--danger-red)', padding: '10px 20px' }) as any }}
                       onClick={() => {
                         if (window.confirm('TERMINATE_ALL_ACTIVE_SESSIONS?')) {
                           setIsAuthenticated(false);
@@ -2442,6 +2750,8 @@ function App() {
           onClick={() => {
             if (currentTab === 'drives') {
               openAddDriveModal();
+            } else if (currentTab === 'contacts') {
+              openAddContactModal();
             } else {
               setIsDialPadOpen(true);
             }
@@ -2450,18 +2760,19 @@ function App() {
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.5, y: 20 }}
           transition={{ type: 'spring', damping: 15, stiffness: 300 }}
-          style={{
-            background: currentTab === 'drives'
-              ? 'linear-gradient(135deg, var(--accent-success), #059669)'
-              : 'linear-gradient(135deg, #8c6909, #d5a216)',
-            boxShadow: currentTab === 'drives'
-              ? '0 0 24px rgba(16, 185, 129, 0.45)'
-              : '0 0 24px rgba(213, 162, 22, 0.45)'
+          {...{
+            style: Object.assign({}, {
+              background: currentTab === 'drives'
+                ? 'linear-gradient(135deg, var(--accent-success), #059669)'
+                : 'linear-gradient(135deg, #8c6909, #d5a216)',
+              boxShadow: currentTab === 'drives'
+                ? '0 0 24px rgba(16, 185, 129, 0.45)'
+                : '0 0 24px rgba(213, 162, 22, 0.45)'
+            }) as any
           }}
         >
-          {currentTab === 'drives' ? <Plus size={28} /> : <Grid3x3 size={24} />}
-        </motion.button>
-      )}
+          {currentTab === 'drives' ? <Plus size={28} /> : currentTab === 'contacts' ? <UserPlus size={24} /> : <Grid3x3 size={24} />}
+        </motion.button>)}
 
       {/* Add Contacts to Drive Modal */}
       <AnimatePresence>
@@ -2474,22 +2785,22 @@ function App() {
           >
             <motion.div
               className="modal-content"
-              style={{ maxWidth: '600px' }}
+              {...{ style: Object.assign({}, { maxWidth: '600px' }) as any }}
               initial={{ y: 50, opacity: 0 }}
               animate={{ y: 0, opacity: 1 }}
               exit={{ y: 50, opacity: 0 }}
             >
               <div className="modal-header">
                 <div>
-                  <div className="hud-kicker" style={{ color: 'var(--neon-gold)' }}>DEPLOYMENT_REINFORCEMENT</div>
-                  <h2 className="m-0" style={{ fontSize: '1.5rem', fontFamily: 'var(--font-heading)' }}>Add Contacts to {viewingDrive.name}</h2>
+                  <div className="hud-kicker modal-add-contacts-header-kicker">DEPLOYMENT_REINFORCEMENT</div>
+                  <h2 className="m-0 modal-add-contacts-h2">Add Contacts to {viewingDrive.name}</h2>
                 </div>
-                <button className="btn-icon" onClick={() => { setIsAddContactModalOpen(false); setAddContactSearchTerm(''); }}>
+                <button className="btn-icon" title="Close" onClick={() => { setIsAddContactModalOpen(false); setAddContactSearchTerm(''); }}>
                   <X size={20} />
                 </button>
               </div>
-              <div className="modal-body" style={{ maxHeight: '60vh', overflowY: 'auto', padding: '1rem' }}>
-                <div className="search-box tactical mb-4" style={{ width: '100%' }}>
+              <div className="modal-body modal-add-contacts-body">
+                <div className="search-box tactical mb-4 modal-search-full-w">
                   <input
                     type="text"
                     placeholder="FILTER_GLOBAL_DATABASE..."
@@ -2535,14 +2846,13 @@ function App() {
                 </div>
               </div>
               <div className="modal-footer flex justify-between items-center mt-6 pt-4 border-t border-white/5">
-                <div className="hud-kicker" style={{ fontSize: '0.6rem', opacity: 0.6 }}>
+                <div className="hud-kicker modal-footer-kicker">
                   {selectedContactsForDrive.length} OPERATIVES_SELECTED
                 </div>
                 <div className="flex gap-3">
-                  <button className="btn btn-secondary" style={{ fontSize: '0.7rem' }} onClick={() => { setIsAddContactModalOpen(false); setAddContactSearchTerm(''); }}>CANCEL</button>
+                  <button className="btn btn-secondary modal-cancel-btn" onClick={() => { setIsAddContactModalOpen(false); setAddContactSearchTerm(''); }}>CANCEL</button>
                   <button
-                    className="btn btn-primary btn-glow"
-                    style={{ fontSize: '0.7rem' }}
+                    className="btn btn-primary btn-glow modal-deploy-btn"
                     disabled={selectedContactsForDrive.length === 0}
                     onClick={() => {
                       setDrives(prev => prev.map(d =>
@@ -2557,13 +2867,12 @@ function App() {
                       showToast(`Successfully deployed ${selectedContactsForDrive.length} new contacts.`, 'success');
                     }}
                   >
-                    DEPLOY_TO_CAMPAIGN
+                    DEPLOY_TO_Drive
                   </button>
                 </div>
               </div>
             </motion.div>
-          </motion.div>
-        )}
+          </motion.div>)}
       </AnimatePresence>
 
       {/* Edit/Add Profile Modal */}
@@ -2583,23 +2892,42 @@ function App() {
             >
               <div className="modal-header">
                 <h2>{isNewContact ? 'Add New Contact' : `Edit Contact - ${editingStudent.name}`}</h2>
-                <button className="btn-icon" onClick={() => setIsEditModalOpen(false)}>
+                <button className="btn-icon" title="Close" onClick={() => setIsEditModalOpen(false)}>
                   <X size={20} />
                 </button>
               </div>
               <div className="modal-body">
                 <div className="input-group">
-                  <label className="input-label">Avatar URL</label>
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      className="input-field flex-1"
-                      placeholder="https://..."
-                      value={editingStudent.avatar}
-                      onChange={(e) => setEditingStudent({ ...editingStudent, avatar: e.target.value })}
-                    />
-                    <button className="btn btn-secondary" onClick={() => setEditingStudent({ ...editingStudent, avatar: getAvatar(editingStudent.name) })}>
-                      Default
+                  <label className="input-label">Avatar</label>
+                  <div className="flex items-center gap-4">
+                    <div className="w-12 h-12 rounded-full border border-white/10 overflow-hidden bg-black/40 flex items-center justify-center">
+                      <img
+                        src={editingStudent.avatar}
+                        alt="Avatar Preview"
+                        className="w-full h-full object-cover"
+                        onError={(e) => (e.currentTarget.src = getAvatar(editingStudent.name))}
+                      />
+                    </div>
+                    <label className="btn btn-secondary" {...{ style: Object.assign({}, { cursor: 'pointer', fontSize: '0.65rem' }) as any }}>
+                      <Upload size={14} className="mr-2" /> CHOOSE IMAGE
+                      <input
+                        type="file"
+                        accept="image/*"
+                        {...{ style: Object.assign({}, { display: 'none' }) as any }}
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) {
+                            const reader = new FileReader();
+                            reader.onloadend = () => {
+                              setEditingStudent({ ...editingStudent, avatar: reader.result as string });
+                            };
+                            reader.readAsDataURL(file);
+                          }
+                        }}
+                      />
+                    </label>
+                    <button className="btn btn-icon" title="Reset to default" onClick={() => setEditingStudent({ ...editingStudent, avatar: getAvatar(editingStudent.name) }) as any}>
+                      <SkipForward size={14} />
                     </button>
                   </div>
                 </div>
@@ -2610,7 +2938,7 @@ function App() {
                     className="input-field"
                     placeholder="E.g. Santhosh Kumar"
                     value={editingStudent.name}
-                    onChange={(e) => setEditingStudent({ ...editingStudent, name: e.target.value })}
+                    onChange={(e) => setEditingStudent({ ...editingStudent, name: e.target.value }) as any}
                   />
                 </div>
                 <div className="flex flex-col md:flex-row gap-4">
@@ -2621,7 +2949,7 @@ function App() {
                       className="input-field"
                       placeholder="E.g. B.Tech Computer Science"
                       value={editingStudent.course}
-                      onChange={(e) => setEditingStudent({ ...editingStudent, course: e.target.value })}
+                      onChange={(e) => setEditingStudent({ ...editingStudent, course: e.target.value }) as any}
                     />
                   </div>
                   <div className="input-group flex-1">
@@ -2631,30 +2959,16 @@ function App() {
                       className="input-field"
                       placeholder="E.g. First Year"
                       value={editingStudent.year}
-                      onChange={(e) => setEditingStudent({ ...editingStudent, year: e.target.value })}
+                      onChange={(e) => setEditingStudent({ ...editingStudent, year: e.target.value }) as any}
                     />
-                  </div>
-                  <div className="input-group flex-1">
-                    <label className="input-label">Lead Status</label>
-                    <select
-                      className="input-field"
-                      value={editingStudent.status}
-                      onChange={(e) => setEditingStudent({ ...editingStudent, status: e.target.value as any })}
-                      style={{ height: '45px' }}
-                    >
-                      <option value="new">🆕 New Lead</option>
-                      <option value="contacted">📞 Contacted</option>
-                      <option value="enrolled">🎓 Enrolled</option>
-                      <option value="not_interested">❌ Not Interested</option>
-                    </select>
                   </div>
                 </div>
 
                 {/* Phone Numbers CRUD */}
                 <div className="mt-2">
                   <div className="flex justify-between items-center mb-2">
-                    <label className="input-label" style={{ margin: 0 }}>Phone Numbers</label>
-                    <button className="btn btn-secondary" style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem' }} onClick={addPhoneNumber}>
+                    <label className="input-label phone-label-m0">Phone Numbers</label>
+                    <button className="btn btn-secondary phone-add-btn" onClick={addPhoneNumber}>
                       <Plus size={14} /> Add Number
                     </button>
                   </div>
@@ -2665,8 +2979,10 @@ function App() {
                     const numberWithoutPrefix = prefixMatch ? phone.number.slice(prefixMatch[0].length).trim() : phone.number.trim();
 
                     return (
-                      <div key={phone.id} className="phone-item">
+                      <div key={phone.id} className="flex gap-2 mb-2">
                         <select
+                          title="Phone type"
+                          className="btn btn-secondary"
                           value={phone.type}
                           onChange={(e) => handlePhoneChange(phone.id, 'type', e.target.value)}
                         >
@@ -2677,6 +2993,8 @@ function App() {
                           <option value="Other">Other</option>
                         </select>
                         <select
+                          title="Country code"
+                          className="btn btn-secondary !w-20"
                           value={currentPrefix}
                           onChange={(e) => {
                             const newPrefix = e.target.value;
@@ -2686,25 +3004,25 @@ function App() {
                           <option value="+91">+91</option>
                           <option value="+1">+1</option>
                           <option value="+44">+44</option>
-                          <option value="+61">+61</option>
                           <option value="+971">+971</option>
                         </select>
                         <input
                           type="text"
+                          className="input-field flex-1"
                           value={numberWithoutPrefix}
                           placeholder="98765 43210"
                           onChange={(e) => {
                             handlePhoneChange(phone.id, 'number', `${currentPrefix} ${e.target.value}`);
                           }}
                         />
-                        <button className="btn-icon" style={{ color: 'var(--accent-danger)' }} onClick={() => removePhoneNumber(phone.id)}>
+                        <button className="btn-icon" title="Remove phone number" onClick={() => removePhoneNumber(phone.id)}>
                           <Trash2 size={16} />
                         </button>
                       </div>
                     )
-                  })}
+                  }) as any}
                   {editingStudent.phoneNumbers.length === 0 && (
-                    <p style={{ fontSize: '0.875rem', color: 'var(--text-muted)' }}>No phone numbers. Add one to make calls.</p>
+                    <p className="text-sm text-muted">No phone numbers. Add one to make calls.</p>
                   )}
                 </div>
 
@@ -2712,9 +3030,10 @@ function App() {
                   <div className="input-group flex-1">
                     <label className="input-label">Gender</label>
                     <select
+                      title="Select gender"
                       className="input-field"
                       value={editingStudent.gender}
-                      onChange={(e) => setEditingStudent({ ...editingStudent, gender: e.target.value })}
+                      onChange={(e) => setEditingStudent({ ...editingStudent, gender: e.target.value }) as any}
                     >
                       <option value="">Select Gender</option>
                       <option value="Male">Male</option>
@@ -2726,9 +3045,13 @@ function App() {
                     <label className="input-label">Date of Birth</label>
                     <input
                       type="date"
+                      title="Date of birth"
+                      placeholder="YYYY-MM-DD"
                       className="input-field"
+                      onFocus={(e) => (e.target.type = 'date')}
+                      onBlur={(e) => { if (!e.target.value) e.target.type = 'date' }}
                       value={editingStudent.dob}
-                      onChange={(e) => setEditingStudent({ ...editingStudent, dob: e.target.value })}
+                      onChange={(e) => setEditingStudent({ ...editingStudent, dob: e.target.value }) as any}
                     />
                   </div>
                 </div>
@@ -2741,7 +3064,7 @@ function App() {
                       className="input-field"
                       placeholder="Email address"
                       value={editingStudent.email}
-                      onChange={(e) => setEditingStudent({ ...editingStudent, email: e.target.value })}
+                      onChange={(e) => setEditingStudent({ ...editingStudent, email: e.target.value }) as any}
                     />
                   </div>
                   <div className="input-group flex-1">
@@ -2751,7 +3074,7 @@ function App() {
                       className="input-field"
                       placeholder="Guardian Contact"
                       value={editingStudent.guardianPhone}
-                      onChange={(e) => setEditingStudent({ ...editingStudent, guardianPhone: e.target.value.replace(/[^\d+]/g, '') })}
+                      onChange={(e) => setEditingStudent({ ...editingStudent, guardianPhone: e.target.value.replace(/[^\d+]/g, '') }) as any}
                     />
                   </div>
                 </div>
@@ -2760,10 +3083,10 @@ function App() {
                   <label className="input-label">Notes</label>
                   <textarea
                     className="input-field"
-                    style={{ minHeight: '80px' }}
+                    {...{ style: Object.assign({}, { minHeight: '80px' }) as any }}
                     placeholder="Additional information..."
                     value={editingStudent.notes}
-                    onChange={(e) => setEditingStudent({ ...editingStudent, notes: e.target.value })}
+                    onChange={(e) => setEditingStudent({ ...editingStudent, notes: e.target.value }) as any}
                   />
                 </div>
               </div>
@@ -2774,8 +3097,7 @@ function App() {
                 </div>
               </div>
             </motion.div>
-          </motion.div>
-        )}
+          </motion.div>)}
       </AnimatePresence>
 
       {/* ════════════════════════════════════════════
@@ -2814,8 +3136,8 @@ function App() {
                   >
                     <Phone size={16} /> History
                   </button>
-                  <div style={{ flex: 1 }}></div>
-                  <button className="btn-icon transparent" onClick={() => setIsDialPadOpen(false)}>
+                  <div className="flex-1"></div>
+                  <button className="btn-icon transparent" title="Close" onClick={() => setIsDialPadOpen(false)}>
                     <X size={18} />
                   </button>
                 </div>
@@ -2825,7 +3147,7 @@ function App() {
               {isMobile && (
                 <div className="dialpad-header">
                   <span className="text-xl font-bold">Phone Dialer</span>
-                  <button className="btn-icon" onClick={() => setIsDialPadOpen(false)}>
+                  <button className="btn-icon" title="Close dialer" onClick={() => setIsDialPadOpen(false)}>
                     <X size={20} />
                   </button>
                 </div>
@@ -2851,7 +3173,7 @@ function App() {
                           <div key={log.id} className="history-item" onClick={() => setDialNumber(log.phoneNumber)}>
                             <div className="history-info">
                               <span className="history-name">{log.studentName}</span>
-                              <span className="history-meta">{log.phoneNumber} • {log.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                              <span className="history-meta">{log.phoneNumber} • {log.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) as any}</span>
                             </div>
                             <Phone size={14} className="history-icon" />
                           </div>
@@ -2868,7 +3190,7 @@ function App() {
                           </span>
                         </div>
                         {dialNumber && (
-                          <button className="dialpad-clear-btn" onClick={() => setDialNumber(prev => prev.slice(0, -1))}>
+                          <button className="dialpad-clear-btn" title="Delete last digit" onClick={() => setDialNumber(prev => prev.slice(0, -1))}>
                             <Delete size={20} />
                           </button>
                         )}
@@ -2956,36 +3278,36 @@ function App() {
             >
               <div className="modal-header">
                 <h2>{isNewDrive ? 'Create Admission Drive' : 'Edit Drive'}</h2>
-                <button className="btn-icon" onClick={() => setIsDriveModalOpen(false)}>
+                <button className="btn-icon" title="Close" onClick={() => setIsDriveModalOpen(false)}>
                   <X size={20} />
                 </button>
               </div>
               <div className="modal-body">
                 <div className="input-group">
-                  <label className="input-label">Campaign Name *</label>
+                  <label className="input-label">Drive Name *</label>
                   <input
                     type="text"
                     className="input-field"
                     placeholder="E.g. Engineering Target 2026"
                     value={editingDrive.name}
-                    onChange={(e) => setEditingDrive({ ...editingDrive, name: e.target.value })}
+                    onChange={(e) => setEditingDrive({ ...editingDrive, name: e.target.value }) as any}
                   />
                 </div>
                 <div className="input-group">
                   <label className="input-label">Description</label>
                   <textarea
                     className="input-field"
-                    style={{ minHeight: '80px' }}
-                    placeholder="Campaign details..."
+                    {...{ style: Object.assign({}, { minHeight: '80px' }) as any }}
+                    placeholder="Drive details..."
                     value={editingDrive.description}
-                    onChange={(e) => setEditingDrive({ ...editingDrive, description: e.target.value })}
+                    onChange={(e) => setEditingDrive({ ...editingDrive, description: e.target.value }) as any}
                   />
                 </div>
                 <div className="input-group">
                   <label className="input-label">Bulk Add Phone Numbers</label>
                   <textarea
                     className="input-field"
-                    style={{ minHeight: '80px' }}
+                    {...{ style: Object.assign({}, { minHeight: '80px' }) as any }}
                     placeholder="E.g. 9876543210, 8765432109 (comma or newline separated)"
                     value={bulkPhoneNumbers}
                     onChange={(e) => setBulkPhoneNumbers(e.target.value)}
@@ -2996,9 +3318,10 @@ function App() {
                   <div className="input-group flex-1">
                     <label className="input-label">Status</label>
                     <select
+                      title="Select drive status"
                       className="input-field"
                       value={editingDrive.status}
-                      onChange={(e) => setEditingDrive({ ...editingDrive, status: e.target.value as any })}
+                      onChange={(e) => setEditingDrive({ ...editingDrive, status: e.target.value as Drive['status'] }) as any}
                     >
                       <option value="draft">Draft</option>
                       <option value="active">Active</option>
@@ -3009,7 +3332,7 @@ function App() {
               </div>
               <div className="modal-footer">
                 {!isNewDrive && (
-                  <button className={`btn btn-secondary ${isMobile ? '' : 'mr-auto'}`} style={{ color: 'var(--accent-danger)', borderColor: 'var(--accent-danger)' }} onClick={() => deleteDrive(editingDrive.id)}>
+                  <button className={`btn btn-secondary drive-delete-btn ${isMobile ? '' : 'mr-auto'}`} onClick={() => deleteDrive(editingDrive.id)}>
                     <Trash2 size={16} /> Delete
                   </button>
                 )}
@@ -3019,8 +3342,7 @@ function App() {
                 </div>
               </div>
             </motion.div>
-          </motion.div>
-        )}
+          </motion.div>)}
       </AnimatePresence>
 
       {/* ── HI-TECH Notification System (Main App) ── */}
@@ -3056,96 +3378,92 @@ function App() {
         {contextMenu && (
           <>
             <div
-              className="fixed inset-0 z-40"
+              className="fixed inset-0 z-40 context-fixed-overlay"
               onClick={() => setContextMenu(null)}
               onContextMenu={(e) => { e.preventDefault(); setContextMenu(null); }}
-              style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 9998 }}
             ></div>
             <motion.div
               initial={isMobile ? { y: '100%' } : { opacity: 0, scale: 0.95 }}
               animate={isMobile ? { y: 0 } : { opacity: 1, scale: 1 }}
               exit={isMobile ? { y: '100%' } : { opacity: 0, scale: 0.95 }}
               className={isMobile ? 'mobile-bottom-sheet' : ''}
-              style={isMobile ? {} : {
-                position: 'fixed',
-                top: contextMenu.y,
-                left: contextMenu.x,
-                zIndex: 9999,
-                backgroundColor: 'var(--bg-secondary)',
-                border: '1px solid var(--border-color)',
-                borderRadius: 'var(--radius-md)',
-                boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
-                padding: '0.5rem',
-                minWidth: '150px'
+              {...{
+                style: isMobile ? {} : {
+                  position: 'fixed',
+                  top: contextMenu.y,
+                  left: contextMenu.x,
+                  zIndex: 9999,
+                  backgroundColor: 'var(--bg-secondary)',
+                  border: '1px solid var(--border-color)',
+                  borderRadius: 'var(--radius-md)',
+                  boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
+                  padding: '0.5rem',
+                  minWidth: '150px'
+                }
               }}
             >
               {isMobile && <div className="sheet-handle" />}
               <div className={isMobile ? 'flex flex-col gap-3' : ''}>
                 <button
                   className="w-full text-left p-4 hover:bg-tertiary rounded-xl flex items-center gap-4 transition-all active:scale-95"
-                  style={{
-                    backgroundColor: isMobile ? 'rgba(213, 162, 22, 0.08)' : 'transparent',
-                    border: isMobile ? '1px solid rgba(213, 162, 22, 0.15)' : 'none',
-                    color: 'var(--text-primary)',
-                    width: '100%',
-                    cursor: 'pointer',
-                    fontSize: isMobile ? '1.15rem' : '0.9rem',
-                    fontWeight: 600
+                  {...{
+                    style: Object.assign({}, {
+                      backgroundColor: isMobile ? 'rgba(213, 162, 22, 0.08)' : 'transparent',
+                      border: isMobile ? '1px solid rgba(213, 162, 22, 0.15)' : 'none',
+                      color: 'var(--text-primary)',
+                      width: '100%',
+                      cursor: 'pointer',
+                      fontSize: isMobile ? '1.15rem' : '0.9rem',
+                      fontWeight: 600
+                    }) as any
                   }}
                   onClick={() => {
                     openEditContactModal(contextMenu.student);
                     setContextMenu(null);
                   }}
                 >
-                  <Edit3 size={isMobile ? 24 : 16} style={{ color: 'var(--accent-primary)' }} />
+                  <Edit3 size={isMobile ? 24 : 16} {...{ style: Object.assign({}, { color: 'var(--accent-primary)' }) as any }} />
                   <div className="flex flex-col">
                     <span>Edit Contact</span>
-                    {isMobile && <span style={{ fontSize: '0.75rem', opacity: 0.6, fontWeight: 400 }}>Modify details or phone numbers</span>}
+                    {isMobile && <span {...{ style: Object.assign({}, { fontSize: '0.75rem', opacity: 0.6, fontWeight: 400 }) as any }}>Modify details or phone numbers</span>}
                   </div>
                 </button>
                 <button
                   className="w-full text-left p-4 hover:bg-tertiary rounded-xl flex items-center gap-4 transition-all active:scale-95"
-                  style={{
-                    backgroundColor: isMobile ? 'rgba(255, 45, 85, 0.05)' : 'transparent',
-                    border: isMobile ? '1px solid rgba(255, 45, 85, 0.1)' : 'none',
-                    color: 'var(--accent-danger)',
-                    width: '100%',
-                    cursor: 'pointer',
-                    fontSize: isMobile ? '1.15rem' : '0.9rem',
-                    fontWeight: 600
+                  {...{
+                    style: Object.assign({}, {
+                      backgroundColor: isMobile ? 'rgba(255, 45, 85, 0.05)' : 'transparent',
+                      border: isMobile ? '1px solid rgba(255, 45, 85, 0.1)' : 'none',
+                      color: 'var(--accent-danger)',
+                      width: '100%',
+                      cursor: 'pointer',
+                      fontSize: isMobile ? '1.15rem' : '0.9rem',
+                      fontWeight: 600
+                    }) as any
                   }}
                   onClick={() => {
-                    const drive = drives.find(d => d.id === contextMenu.driveId);
-                    if (drive) {
-                      const updatedDrive = { ...drive, contactIds: drive.contactIds.filter(id => id !== contextMenu.student.id) };
-                      setDrives(drives.map(d => d.id === updatedDrive.id ? updatedDrive : d));
-                      if (viewingDrive?.id === updatedDrive.id) {
-                        setViewingDrive(updatedDrive);
-                      }
-                      showToast('Contact removed from campaign', 'info');
-                    }
+                    removeContactFromDrive(contextMenu.driveId, contextMenu.student.id);
                     setContextMenu(null);
                   }}
                 >
                   <Trash2 size={isMobile ? 24 : 16} />
                   <div className="flex flex-col">
-                    <span>Remove from Campaign</span>
-                    {isMobile && <span style={{ fontSize: '0.75rem', opacity: 0.6, fontWeight: 400 }}>Delete this lead from {viewingDrive?.name}</span>}
+                    <span>Remove from Drive</span>
+                    {isMobile && <span {...{ style: Object.assign({}, { fontSize: '0.75rem', opacity: 0.6, fontWeight: 400 }) as any }}>Delete this lead from {viewingDrive?.name}</span>}
                   </div>
                 </button>
               </div>
             </motion.div>
-          </>
-        )}
+          </>)}
         {isCsvModalOpen && csvPreview && (
           <motion.div className="modal-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-            <motion.div className="modal-content" style={{ maxWidth: '600px' }} initial={{ y: 50 }} animate={{ y: 0 }}>
+            <motion.div className="modal-content" {...{ style: Object.assign({}, { maxWidth: '600px' }) as any }} initial={{ y: 50 }} animate={{ y: 0 }}>
               <div className="modal-header">
                 <h2>Map CSV Columns</h2>
-                <button className="btn-icon" onClick={() => setIsCsvModalOpen(false)}><X size={20} /></button>
+                <button className="btn-icon" title="Close" onClick={() => setIsCsvModalOpen(false)}><X size={20} /></button>
               </div>
               <div className="modal-body">
-                <p style={{ marginBottom: '1.5rem', color: 'var(--text-secondary)' }}>
+                <p {...{ style: Object.assign({}, { marginBottom: '1.5rem', color: 'var(--text-secondary)' }) as any }}>
                   File: <strong>{csvPreview.fileName}</strong><br />
                   {csvPreview.sheets.length > 1
                     ? `Detected ${csvPreview.sheets.length} sheets. A Campaign will be created for each sheet.`
@@ -3162,12 +3480,13 @@ function App() {
                     { label: 'Date of Birth', key: 'dob' },
                     { label: 'Guardian Phone', key: 'guardianPhone' }
                   ].map(field => (
-                    <div key={field.key} className="flex justify-between items-center p-3" style={{ background: 'var(--bg-primary)', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
-                      <span style={{ fontWeight: 600 }}>{field.label}</span>
+                    <div key={field.key} className="flex justify-between items-center p-3 csv-mapping-row">
+                      <span className="csv-mapping-label">{field.label}</span>
                       <select
+                        title={`Map column for ${field.label}`}
                         value={csvMapping[field.key as keyof typeof csvMapping]}
-                        onChange={(e) => setCsvMapping({ ...csvMapping, [field.key]: parseInt(e.target.value) })}
-                        style={{ padding: '0.5rem', borderRadius: '4px', background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)' }}
+                        onChange={(e) => setCsvMapping({ ...csvMapping, [field.key]: parseInt(e.target.value) }) as any}
+                        className="csv-mapping-select"
                       >
                         <option value="-1">(none)</option>
                         {csvPreview.sheets[0].headers.map((h, i) => <option key={i} value={i}>{h || `Column ${i + 1}`}</option>)}
@@ -3177,27 +3496,28 @@ function App() {
                 </div>
 
                 <div className="input-group mt-6">
-                  <label className="input-label">Sync with Campaign (Optional)</label>
+                  <label className="input-label">Sync with Drive (Optional)</label>
                   <select
+                    title="Sync with campaign"
                     className="input-field"
                     value={selectedDriveForImport}
                     onChange={(e) => setSelectedDriveForImport(e.target.value)}
                   >
-                    <option value="">No Campaign (Import to Contacts only)</option>
+                    <option value="">No Drive (Import to Contacts only)</option>
                     {drives.map(drive => (
                       <option key={drive.id} value={drive.id}>{drive.name}</option>
                     ))}
                   </select>
 
                   {selectedDriveForImport && (
-                    <div className="flex items-center gap-2 mt-3" style={{ padding: '0.5rem', background: 'rgba(var(--accent-rgb), 0.05)', borderRadius: '6px' }}>
+                    <div className="flex items-center gap-2 mt-3 csv-override-wrap">
                       <input
                         type="checkbox"
                         id="overrideCourse"
                         checked={overrideCourseWithDrive}
                         onChange={(e) => setOverrideCourseWithDrive(e.target.checked)}
                       />
-                      <label htmlFor="overrideCourse" style={{ fontSize: '0.8rem', cursor: 'pointer' }}>
+                      <label htmlFor="overrideCourse" className="csv-override-label">
                         Set all contacts' <strong>Course / Degree</strong> to "{drives.find(d => d.id === selectedDriveForImport)?.name}"
                       </label>
                     </div>
@@ -3205,15 +3525,15 @@ function App() {
 
                   {!overrideCourseWithDrive && selectedDriveForImport && (
                     <p className="text-xs text-muted mt-2">
-                      Contacts will be added to the campaign, but will keep their individual "Course / Degree" from the CSV.
+                      Contacts will be added to the Drive, but will keep their individual "Course / Degree" from the CSV.
                     </p>
                   )}
                 </div>
 
-                <div style={{ marginTop: '2rem', padding: '1rem', background: 'rgba(var(--accent-rgb), 0.05)', borderRadius: '8px', fontSize: '0.85rem' }}>
+                <div className="csv-preview-box">
                   <strong>Preview ({csvPreview.sheets[0].name} - Row 1):</strong><br />
-                  Name: {csvMapping.name !== -1 ? (csvPreview.sheets[0].rows[0][csvMapping.name] || 'N/A') : 'N/A'} |
-                  Phone: {csvMapping.phone !== -1 ? (csvPreview.sheets[0].rows[0][csvMapping.phone] || 'N/A') : 'N/A'}
+                  Name: {csvMapping.name !== -1 ? csvCell(csvPreview.sheets[0].rows[0], csvMapping.name) || 'N/A' : 'N/A'} |
+                  Phone: {csvMapping.phone !== -1 ? csvCell(csvPreview.sheets[0].rows[0], csvMapping.phone) || 'N/A' : 'N/A'}
                 </div>
               </div>
               <div className="modal-footer">
@@ -3227,12 +3547,11 @@ function App() {
                   let skippedDuplicates = 0;
                   for (const sheet of csvPreview.sheets) {
                     const sheetStudents: Student[] = sheet.rows.map((row, i) => {
-                      const phoneRaw = csvMapping.phone !== -1 ? String(row[csvMapping.phone] || '') : '';
+                      const phoneRaw = csvCell(row, csvMapping.phone);
                       const phoneCleaned = cleanPhone(phoneRaw);
 
                       if (!phoneCleaned) return null;
 
-                      // Check for duplicates in current memory or local state
                       const isDuplicate = students.some(s => s.phoneNumbers.some(p => cleanPhone(p.number) === phoneCleaned)) ||
                         allNewStudents.some(s => s.phoneNumbers.some(p => cleanPhone(p.number) === phoneCleaned));
 
@@ -3242,25 +3561,26 @@ function App() {
                       }
 
                       const studentId = `imp_${Date.now()}_${sheet.name}_${i}`;
-                      const csvCourse = csvMapping.course !== -1 ? (row[csvMapping.course] || sheet.name) : sheet.name;
+                      const leadName = csvMapping.name !== -1 ? csvCell(row, csvMapping.name) || 'Unnamed Lead' : 'Unnamed Lead';
+                      const csvCourse = csvMapping.course !== -1 ? csvCell(row, csvMapping.course) || sheet.name : sheet.name;
 
                       return {
                         id: studentId,
-                        name: csvMapping.name !== -1 ? (row[csvMapping.name] || 'Unnamed Lead') : 'Unnamed Lead',
+                        name: leadName,
                         phoneNumbers: [{
                           id: `p_${Date.now()}_${i}`,
                           type: 'Mobile',
                           number: phoneRaw.replace(/[^\d+]/g, '')
                         }],
                         course: csvCourse,
-                        gender: csvMapping.gender !== -1 ? (row[csvMapping.gender] || '') : '',
-                        dob: csvMapping.dob !== -1 ? (row[csvMapping.dob] || '') : '',
-                        guardianPhone: csvMapping.guardianPhone !== -1 ? (String(row[csvMapping.guardianPhone]) || '').replace(/[^\d+]/g, '') : '',
+                        gender: csvCell(row, csvMapping.gender),
+                        dob: csvCell(row, csvMapping.dob),
+                        guardianPhone: cleanPhone(csvCell(row, csvMapping.guardianPhone)),
                         year: 'N/A',
                         email: '',
                         status: 'new' as Student['status'],
                         notes: `Imported from ${csvPreview.fileName} (Sheet: ${sheet.name})`,
-                        avatar: getAvatar(csvMapping.name !== -1 ? (row[csvMapping.name] || 'Unnamed Lead') : 'Unnamed Lead')
+                        avatar: getAvatar(leadName)
                       } as Student;
                     }).filter((s): s is Student => s !== null);
 
@@ -3311,6 +3631,50 @@ function App() {
             </motion.div>
           </motion.div>
         )}
+
+        {isCopilotOpen && activeStudent && (
+          <motion.div
+            className="modal-overlay"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setIsCopilotOpen(false)}
+          >
+            <motion.div
+              className="modal-content"
+              {...{ style: Object.assign({}, { maxWidth: '560px' }) as any }}
+              initial={{ y: 40, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="modal-header">
+                <div>
+                  <div className="hud-kicker" {...{ style: Object.assign({}, { color: 'var(--neon-gold)' }) as any }}>AI CALL SCRIPTS</div>
+                  <h2 className="m-0">Copilot — {activeStudent.name}</h2>
+                </div>
+                <button className="btn-icon" title="Close" onClick={() => setIsCopilotOpen(false)}><X size={20} /></button>
+              </div>
+              <div className="modal-body" {...{ style: Object.assign({}, { maxHeight: '60vh', overflowY: 'auto' }) as any }}>
+                {scripts.map((script) => {
+                  const text = resolveScript(script.content, activeStudent);
+                  return (
+                    <motion.div key={script.title} className="settings-card-tactical mb-4" {...{ style: Object.assign({}, { padding: '1rem' }) as any }}>
+                      <div className="font-bold text-sm mb-2" {...{ style: Object.assign({}, { color: 'var(--neon-gold)' }) as any }}>{script.title}</div>
+                      <p className="text-sm text-muted m-0 mb-3" {...{ style: Object.assign({}, { lineHeight: 1.5 }) as any }}>{text}</p>
+                      <div className="flex gap-2 flex-wrap">
+                        <button type="button" className="btn btn-secondary" {...{ style: Object.assign({}, { fontSize: '0.7rem' }) as any }} onClick={() => copyToClipboard(text)}>
+                          <Copy size={14} /> Copy
+                        </button>
+                        <button type="button" className="btn btn-primary" {...{ style: Object.assign({}, { fontSize: '0.7rem' }) as any }} onClick={() => openWhatsApp({ ...activeStudent, phoneNumbers: activeStudent.phoneNumbers }) as any}>
+                          <MessageSquare size={14} /> WhatsApp
+                        </button>
+                      </div>
+                    </motion.div>
+                  );
+                }) as any}
+              </div>
+            </motion.div>
+          </motion.div>)}
       </AnimatePresence>
     </div>
   );

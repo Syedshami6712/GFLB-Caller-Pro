@@ -7,5 +7,8 @@ export default defineConfig({
   base: '/GFLB-Caller-Pro/',
   server: {
     open: true, // Set to 'msedge' to force Microsoft Edge on Windows
+  },
+  build: {
+    chunkSizeWarningLimit: 1600,
   }
 })
